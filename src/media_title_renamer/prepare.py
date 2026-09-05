@@ -930,7 +930,8 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
 
     print("\nM-Team 整季发布资料已准备完：")
     print(f"  整季标题：{pack_title}")
-    print(f"  视频文件：{len(provisional)} 个，{'\u5df2全部改名' if args.apply else '\u5c1a未改名'}")
+    rename_status = "已全部改名" if args.apply else "尚未改名"
+    print(f"  视频文件：{len(provisional)} 个，{rename_status}")
     print(f"  副标题：{subtitle or '未识别'}")
     print(f"  分类：{category}")
     print(f"  豆瓣：{douban.url if douban else '未找到，请手工补充'}")
