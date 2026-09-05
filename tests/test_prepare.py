@@ -1,7 +1,9 @@
 import hashlib
+import io
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -48,22 +50,23 @@ class PrepareTests(unittest.TestCase):
             first = root / "Example.Show.S01E01.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
             second.write_bytes(b"episode two")
             first.write_bytes(b"episode one")
-            package_path = prepare_main(
-                [
-                    str(root),
-                    "--title",
-                    "Example Show",
-                    "--year",
-                    "2024",
-                    "--source",
-                    "WEB-DL",
-                    "--offline",
-                    "--douban-url",
-                    "https://movie.douban.com/subject/1/",
-                    "--skip-screenshots",
-                    "--skip-torrent",
-                ]
-            )
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root),
+                        "--title",
+                        "Example Show",
+                        "--year",
+                        "2024",
+                        "--source",
+                        "WEB-DL",
+                        "--offline",
+                        "--douban-url",
+                        "https://movie.douban.com/subject/1/",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                    ]
+                )
             package = json.loads(package_path.read_text(encoding="utf-8"))
 
         read_mediainfo.assert_called_once_with(first)
