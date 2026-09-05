@@ -65,15 +65,28 @@ class PrepareTests(unittest.TestCase):
                         "https://movie.douban.com/subject/1/",
                         "--skip-screenshots",
                         "--skip-torrent",
+                        "--apply",
                     ]
                 )
             package = json.loads(package_path.read_text(encoding="utf-8"))
+            prepared_files = sorted(
+                str(path.relative_to(root))
+                for path in root.rglob("*.mkv")
+            )
 
         read_mediainfo.assert_called_once()
         self.assertEqual(read_mediainfo.call_args.args[0].name, first.name)
         self.assertEqual(read_mediainfo_text.call_count, 1)
         self.assertTrue(package["media_probe_path"].endswith("S01E01.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"))
         self.assertEqual(len(package["files"]), 2)
+        self.assertEqual(
+            prepared_files,
+            [
+                str(Path("Season 01") / "Example Show 2024 S01E01 1080p WEB-DL H.264 DD5.1-GRP.mkv"),
+                str(Path("Season 01") / "Example Show 2024 S01E02 1080p WEB-DL H.264 DD5.1-GRP.mkv"),
+            ],
+        )
+        self.assertTrue(all(record["relative_path"].startswith("Season 01") for record in package["files"]))
         self.assertTrue(package["files"][0]["mediainfo_text"])
         self.assertFalse(package["files"][1]["mediainfo_text"])
 

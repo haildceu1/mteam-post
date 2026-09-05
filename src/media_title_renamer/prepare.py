@@ -778,6 +778,13 @@ def _season_label(episodes: list[str]) -> str:
     return f"S{seasons[0]:02d}-S{seasons[-1]:02d}"
 
 
+def _season_folder(episode: str) -> str:
+    match = re.match(r"S(\d{1,2})", episode, re.I)
+    if not match:
+        raise ValueError(f"无法从季集号识别分季目录：{episode}")
+    return f"Season {int(match.group(1)):02d}"
+
+
 def _folder_videos(root: Path) -> list[Path]:
     iterator = root.rglob("*")
     return sorted(
@@ -865,10 +872,14 @@ def _folder_screenshots(
 
 def _apply_folder_renames(plans: list[FolderPlan]) -> None:
     completed: list[tuple[Path, Path]] = []
+    created_directories: list[Path] = []
     try:
         for plan in plans:
             if plan.source_path == plan.target_path:
                 continue
+            if not plan.target_path.parent.exists():
+                plan.target_path.parent.mkdir(parents=True, exist_ok=True)
+                created_directories.append(plan.target_path.parent)
             plan.source_path.rename(plan.target_path)
             completed.append((plan.source_path, plan.target_path))
     except OSError as exc:
@@ -879,6 +890,11 @@ def _apply_folder_renames(plans: list[FolderPlan]) -> None:
                     target.rename(source)
             except OSError as rollback_exc:
                 rollback_errors.append(f"{target}: {rollback_exc}")
+        for directory in reversed(created_directories):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
         detail = f"；回滚也遇到问题：{' | '.join(rollback_errors)}" if rollback_errors else "；已回滚先前的改名"
         raise RuntimeError(f"批量改名失败：{exc}{detail}") from exc
 
@@ -946,8 +962,9 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             platform=platform,
             include_audio_count=args.audio_count,
         )
-        target = path.with_name(release_title + path.suffix.lower())
-        logical = path.relative_to(root).parent / target.name
+        season_directory = root / _season_folder(episode)
+        target = season_directory / (release_title + path.suffix.lower())
+        logical = target.relative_to(root)
         provisional.append(
             FolderPlan(
                 source_path=path,
