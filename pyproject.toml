@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mteam-post"
+version = "0.5.0"
+description = "本地媒体识别、规范重命名、M-Team 发布资料准备与 ChromeDriver 自动填表"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["selenium>=4.15"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: Microsoft :: Windows",
+]
+
+[project.urls]
+Homepage = "https://github.com/haildceu1/mteam-post"
+Repository = "https://github.com/haildceu1/mteam-post"
+
+[project.scripts]
+mteam-post = "media_title_renamer.cli:main"
+media-title-rename = "media_title_renamer.cli:main"
+random-video-screenshots = "random_video_screenshots.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+build/
+dist/
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Credentials and browser state
+.env
+.env.*
+*.cookie
+*cookies*.txt
+*cookie*.json
+*request-headers*.txt
+chrome-profile/
+browser-profile/
+
+# Generated M-Team artifacts
+*.prepare/
+*.torrent
+screenshots/
+mediainfo/
