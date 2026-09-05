@@ -11,6 +11,9 @@ from media_title_renamer.prepare import (
     create_private_v1_folder_torrent,
     create_private_v1_torrent,
     infer_mteam_category,
+    prepare_technical_info,
+    read_bdinfo_report,
+    select_longest_bdinfo_playlist,
 )
 
 
@@ -109,6 +112,44 @@ class PrepareTests(unittest.TestCase):
             build_subtitle(douban=douban, tmdb=tmdb, fallback_title="Example Show", language_code="ru"),
             "示例剧 / Оригинал [俄语]",
         )
+
+    def test_longest_bdinfo_playlist_is_selected(self):
+        listing = """
+#   Group  Playlist File  Length    Estimated Bytes Measured Bytes
+2   1      00001.MPLS     00:03:20
+1   1      00005.MPLS     02:20:07
+3   2      00009.MPLS     00:01:00
+"""
+        self.assertEqual(select_longest_bdinfo_playlist(listing), "00005")
+
+    def test_bluray_iso_uses_existing_bdinfo_report(self):
+        report = """DISC INFO:
+Disc Title: Example
+
+PLAYLIST REPORT:
+Name: 00005.MPLS
+
+VIDEO:
+MPEG-H HEVC Video
+
+AUDIO:
+Dolby TrueHD/Atmos Audio
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            report_path = root / "source.txt"
+            report_path.write_text(report, encoding="utf-8")
+            kind, text, saved_path, playlist = prepare_technical_info(
+                root / "Example.iso",
+                "Example.iso",
+                "UHD BluRay",
+                root / "prepare",
+                bdinfo_report=report_path,
+            )
+            self.assertEqual(kind, "BDInfo")
+            self.assertEqual(playlist, "00005")
+            self.assertEqual(read_bdinfo_report(saved_path), text)
+            self.assertEqual(saved_path.name, "bdinfo.txt")
 
 
 if __name__ == "__main__":

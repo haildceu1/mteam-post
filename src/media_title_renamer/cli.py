@@ -419,7 +419,7 @@ def _strip_group(stem: str) -> tuple[str, str | None]:
         return stem, None
     separator = separators[0]
     candidate = stem[separator + 1 :]
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._& -]*", candidate):
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._&@ -]*", candidate):
         return stem[:separator], candidate
     return stem, None
 

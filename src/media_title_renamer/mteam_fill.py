@@ -152,6 +152,32 @@ def _set_local_storage(driver, session: MTeamSession) -> None:
     )
 
 
+def _has_mteam_auth(driver) -> bool:
+    try:
+        return bool(driver.execute_script("return window.localStorage.getItem('auth')"))
+    except Exception:
+        return False
+
+
+def _wait_for_mteam_auth(driver, timeout_seconds: int) -> bool:
+    """Wait for the SPA to persist its token after an interactive login."""
+    if _has_mteam_auth(driver):
+        return True
+    if timeout_seconds <= 0:
+        return False
+    print(
+        "请在已打开的 ChromeDriver 窗口中登录 M-Team；程序会自动检测登录状态，"
+        f"最长等待 {timeout_seconds} 秒，无需回到终端按回车。"
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        if _has_mteam_auth(driver):
+            print("已检测到 M-Team 登录状态，继续执行。")
+            return True
+    return False
+
+
 def _set_react_value(driver, element, value: str) -> None:
     driver.execute_script(
         """
@@ -351,7 +377,9 @@ def _fill_page(driver, package: dict[str, object], *, upload: bool) -> None:
     _fill_field(driver, ("副标题", "subtitle"), str(package.get("subtitle") or ""), "副标题")
     _fill_field(driver, ("imdb", "imdb url", "IMDb链接"), str(package.get("imdb_url") or ""), "IMDb链接")
     _fill_field(driver, ("豆瓣链接", "douban", "douban url"), str(package.get("douban_url") or ""), "豆瓣链接")
-    _fill_field(driver, ("mediainfo", "media info"), str(package.get("mediainfo_text") or ""), "MediaInfo")
+    technical_type = str(package.get("technical_info_type") or "MediaInfo")
+    technical_text = str(package.get("technical_info_text") or package.get("mediainfo_text") or "")
+    _fill_field(driver, ("mediainfo", "media info", "bdinfo", "bd info"), technical_text, technical_type)
     _select_category(driver, str(package.get("category") or ""))
     if package.get("douban_url"):
         time.sleep(0.5)
@@ -420,6 +448,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--upload", action="store_true", help="在填表后上传种子和截图；仍不会点击最终发布")
     parser.add_argument("--yes", action="store_true", help="跳过上传前确认；仅建议在你已检查资料包后使用")
     parser.add_argument("--keep-open", action="store_true", help="填表后等待回车再关闭浏览器")
+    parser.add_argument("--login-timeout", type=int, default=600, help="等待手工登录的秒数；默认 600")
     parser.add_argument("--login-only", action="store_true", help="只打开专用 Chrome 配置供你手工登录，不读取资料包、不填表")
     parser.add_argument("--inspect-only", action="store_true", help="只读取发布页控件，不填写、不上传")
     return parser
@@ -449,10 +478,12 @@ def main(argv: list[str] | None = None) -> None:
             origin = _origin(args.url)
             driver.get(origin)
             if args.login_only:
-                print("ChromeDriver 窗口已打开。请在窗口中手工登录 M-Team；完成后回到此终端按回车。")
-                input()
-                auth_present = bool(driver.execute_script("return window.localStorage.getItem('auth')"))
-                print(f"登录态检查：localStorage auth={'已保存' if auth_present else '未发现'}。")
+                auth_present = _wait_for_mteam_auth(driver, args.login_timeout)
+                if not auth_present:
+                    raise ValueError(
+                        "等待登录超时，仍未检测到 M-Team auth；请确认浏览器页面能正常联网并已完成登录"
+                    )
+                print("登录态检查：localStorage auth 已保存。")
                 return
             if args.inspect_only:
                 # When a request-header dump is supplied, restore it before
@@ -469,10 +500,8 @@ def main(argv: list[str] | None = None) -> None:
                             continue
                     driver.refresh()
                 time.sleep(2)
-                if "/login" in driver.current_url.casefold() and args.profile_dir:
-                    print("当前 Chrome 会话仍在登录页；请在窗口中完成登录后回到终端按回车。")
-                    input()
-                    time.sleep(1)
+                if args.profile_dir and not _has_mteam_auth(driver):
+                    _wait_for_mteam_auth(driver, args.login_timeout)
                 if driver.current_url.rstrip("/") != args.url.rstrip("/"):
                     driver.get(args.url)
                     time.sleep(2)
@@ -491,9 +520,7 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 print(f"M-Team 页面标题：{driver.title}")
                 print(f"M-Team 页面地址：{driver.current_url}")
-                auth_present = bool(
-                    driver.execute_script("return window.localStorage.getItem('auth')")
-                )
+                auth_present = _has_mteam_auth(driver)
                 print(f"localStorage auth={'已保存' if auth_present else '未发现'}")
                 print("页面控件（仅属性，不读取输入值）：")
                 for item in controls:
@@ -513,13 +540,9 @@ def main(argv: list[str] | None = None) -> None:
             # durable localStorage token (or an old token may be rejected),
             # so fall back to an interactive login in this same driver.
             time.sleep(2)
-            auth_present = bool(driver.execute_script("return window.localStorage.getItem('auth')"))
-            on_login_page = "/login" in driver.current_url.casefold()
-            if args.profile_dir and on_login_page:
-                print("当前 Chrome 会话尚未通过 M-Team 登录校验，请在已打开的窗口中登录；完成后回到此终端按回车继续。")
-                input()
-                time.sleep(1)
-                auth_present = bool(driver.execute_script("return window.localStorage.getItem('auth')"))
+            auth_present = _has_mteam_auth(driver)
+            if args.profile_dir and not auth_present:
+                auth_present = _wait_for_mteam_auth(driver, args.login_timeout)
             print(f"M-Team 页面已打开；localStorage auth={'已恢复' if auth_present else '未发现'}。")
             if not auth_present:
                 raise ValueError("M-Team 登录态不可用；请重新登录，或提供当前有效的 --cookie-file。")
@@ -530,7 +553,8 @@ def main(argv: list[str] | None = None) -> None:
                 driver.get(args.url)
                 time.sleep(2)
             if not args.yes:
-                action = "标题、副标题、豆瓣链接和 MediaInfo"
+                technical_type = str(package.get("technical_info_type") or "MediaInfo")
+                action = f"标题、副标题、豆瓣链接和 {technical_type}"
                 if args.upload:
                     action += "，以及种子和本地截图文件"
                 answer = input(

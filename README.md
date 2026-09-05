@@ -12,9 +12,15 @@
 - Google Chrome
 - MediaInfo CLI（命令为 `mediainfo`）
 - FFmpeg（同时需要 `ffmpeg` 和 `ffprobe`）
+- [bdinfo-rs](https://github.com/agentjp/bdinfo-rs)（仅自动处理 Blu-ray/UHD ISO 时需要）
 - Git
 
 Selenium 会自动寻找或下载与 Chrome 匹配的 ChromeDriver，一般不需要手工下载驱动。
+蓝光 ISO 必须使用 BDInfo 格式；Windows 可安装命令行版：
+
+```powershell
+winget install agentjp.bdinfo-rs
+```
 
 在 PowerShell 中检查：
 
@@ -23,6 +29,7 @@ py --version
 mediainfo --version
 ffmpeg -version
 ffprobe -version
+bdinfo-rs --version
 git --version
 ```
 
@@ -75,7 +82,7 @@ media-title-rename mteam-fill --login-only `
   --url "https://kp.m-team.cc/"
 ```
 
-在打开的 ChromeDriver 窗口中完成登录，然后回到 PowerShell 按回车。以后一直复用同一个 `--profile-dir`。
+在打开的 ChromeDriver 窗口中完成登录；程序检测到 `localStorage auth` 后会自动继续，无需切回 PowerShell 按回车。以后一直复用同一个 `--profile-dir`。
 
 ### 5. 一条命令准备并填写发布页
 
@@ -88,7 +95,7 @@ media-title-rename publish "F:\TV\20.22" `
   --keep-open
 ```
 
-单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并将截图追加在简介末尾。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。
+单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并将截图追加在简介末尾。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。
 
 升级项目时执行：
 
@@ -215,7 +222,7 @@ media-title-rename mteam-fill --login-only `
   --url "https://kp.m-team.cc/"
 ```
 
-登录完成后回到终端按回车，配置会保留下来；之后使用同一个 `--profile-dir` 即可，不再需要导出 Cookie 或请求头文件。
+程序检测到登录成功后会自动继续，配置会保留下来；之后使用同一个 `--profile-dir` 即可，不再需要导出 Cookie 或请求头文件。默认等待 10 分钟，可用 `--login-timeout 1200` 调整。
 
 ### M-Team 分类
 
@@ -234,3 +241,27 @@ Windows 下会临时挂载 ISO，从 `BDMV/STREAM` 或 `VIDEO_TS` 中选择最�
 ```powershell
 media-title-rename prepare "E:\Movie\Disc.iso" --screenshot-source "M:\BDMV\STREAM\00001.m2ts"
 ```
+
+### 蓝光 ISO 的 BDInfo
+
+Blu-ray/UHD ISO 不再把 ISO 容器的简略 MediaInfo 填入发布页，而是调用 `bdinfo-rs`：先列出播放列表，默认选择时长最长的一项，再完整扫描并保存经典 BDInfo Text。已知主播放列表时可明确指定：
+
+```powershell
+media-title-rename publish "D:\Movie\Disc.iso" `
+  --apply `
+  --bdinfo-playlist 00005 `
+  --profile-dir "D:\Cinema\mteam" `
+  --keep-open
+```
+
+如果已经用图形版 BDInfo 保存了 Text 报告，可以直接复用，避免再次完整扫描原盘：
+
+```powershell
+media-title-rename publish "D:\Movie\Disc.iso" `
+  --apply `
+  --bdinfo-report "D:\Movie\BDINFO.Disc.txt" `
+  --profile-dir "D:\Cinema\mteam" `
+  --keep-open
+```
+
+`D:\Cinema\tools\BDInfo\BDInfo.exe` 这类 WinForms 图形版不能静默操作；它生成的报告请通过 `--bdinfo-report` 使用。也可以用 `--bdinfo-exe` 或环境变量 `BDINFO_PATH` 指向其他兼容的 BDInfo CLI。

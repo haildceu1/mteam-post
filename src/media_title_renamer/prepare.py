@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -470,6 +471,175 @@ def read_mediainfo_text(path: Path, display_name: str) -> str:
     return text.strip() + "\n"
 
 
+def read_bdinfo_report(path: Path) -> str:
+    """Read and validate a classic BDInfo text report."""
+    if not path.is_file():
+        raise FileNotFoundError(f"找不到 BDInfo 报告：{path}")
+    payload = path.read_bytes()
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = payload.decode("cp1252", errors="replace")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    required = ("DISC INFO:", "PLAYLIST REPORT:", "VIDEO:", "AUDIO:")
+    missing = [label for label in required if label not in text.upper()]
+    if missing:
+        raise ValueError("不是完整的 BDInfo Text 报告，缺少：" + "、".join(missing))
+    return text.strip() + "\n"
+
+
+def _normalise_bdinfo_playlist(value: str) -> str:
+    match = re.fullmatch(r"\s*(\d{1,5})(?:\.MPLS)?\s*", value, re.I)
+    if not match:
+        raise ValueError("BDInfo 播放列表应类似 00005 或 00005.MPLS")
+    return f"{int(match.group(1)):05d}"
+
+
+def select_longest_bdinfo_playlist(output: str) -> str:
+    """Return the longest playlist name from ``bdinfo-rs --list`` output."""
+    candidates: list[tuple[int, str]] = []
+    pattern = re.compile(
+        r"^\s*\d+\s+\d+\s+(\d{5})\.MPLS\s+(\d{1,3}):(\d{2}):(\d{2})(?:\.\d+)?",
+        re.I | re.M,
+    )
+    for match in pattern.finditer(output):
+        hours, minutes, seconds = (int(value) for value in match.groups()[1:])
+        candidates.append((hours * 3600 + minutes * 60 + seconds, match.group(1)))
+    if not candidates:
+        raise RuntimeError(
+            "无法从 BDInfo CLI 列表中自动判断主播放列表；请添加 --bdinfo-playlist 00000"
+        )
+    return max(candidates)[1]
+
+
+def _find_bdinfo_cli(explicit: str | None = None) -> str:
+    requested = explicit or os.environ.get("BDINFO_PATH", "")
+    if requested:
+        candidate = Path(requested).expanduser()
+        if candidate.is_file():
+            return str(candidate.resolve())
+        found = shutil.which(requested)
+        if found:
+            return found
+        raise FileNotFoundError(f"找不到 BDInfo CLI：{requested}")
+    found = shutil.which("bdinfo-rs") or shutil.which("bdinfo-rs.exe")
+    if found:
+        return found
+    raise FileNotFoundError(
+        "Blu-ray ISO 必须使用 BDInfo：请先运行 `winget install agentjp.bdinfo-rs`，"
+        "或用 --bdinfo-report 指定已由图形版 BDInfo 保存的 Text 报告"
+    )
+
+
+def _bdinfo_cli_kind(executable: str) -> str:
+    name = Path(executable).stem.casefold()
+    if "bdinfo-rs" in name:
+        return "rs"
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "指定的 BDInfo.exe 看起来是图形版，不能静默生成报告；"
+            "请改用 bdinfo-rs，或通过 --bdinfo-report 传入图形版保存的报告"
+        ) from exc
+    version_text = (result.stdout + result.stderr).casefold()
+    if "bdinfo-rs" in version_text:
+        return "rs"
+    return "classic"
+
+
+def generate_bdinfo_report(
+    disc: Path,
+    output_dir: Path,
+    *,
+    executable: str | None = None,
+    playlist: str | None = None,
+) -> tuple[str, Path, str]:
+    """Generate a BDInfo report for one Blu-ray ISO and return text/path/MPLS."""
+    cli = _find_bdinfo_cli(executable)
+    kind = _bdinfo_cli_kind(cli)
+    selected = _normalise_bdinfo_playlist(playlist) if playlist else ""
+    if not selected:
+        list_command = [cli, str(disc), "--list"] if kind == "rs" else [cli, "--list", str(disc)]
+        listing = subprocess.run(
+            list_command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if listing.returncode != 0:
+            detail = listing.stderr.strip() or listing.stdout.strip() or f"退出码 {listing.returncode}"
+            raise RuntimeError(f"BDInfo 播放列表扫描失败：{detail}")
+        selected = select_longest_bdinfo_playlist(listing.stdout)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if kind == "rs":
+        command = [cli, str(disc), str(output_dir), "--mpls", selected]
+    else:
+        command = [cli, "--mpls", f"{selected}.MPLS", str(disc), str(output_dir)]
+    print(f"正在生成 BDInfo：主播放列表 {selected}.MPLS；完整扫描可能需要较长时间……")
+    result = subprocess.run(command)
+    if result.returncode not in {0, 3}:
+        raise RuntimeError(f"BDInfo 扫描失败，退出码 {result.returncode}")
+    reports = sorted(
+        (
+            item
+            for item in output_dir.glob("*.txt")
+            if item.is_file() and item.name.casefold().startswith("bdinfo")
+        ),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    if not reports:
+        raise RuntimeError(f"BDInfo CLI 已结束，但输出目录中没有找到报告：{output_dir}")
+    report_path = reports[0]
+    return read_bdinfo_report(report_path), report_path, selected
+
+
+def prepare_technical_info(
+    path: Path,
+    display_name: str,
+    source: str,
+    output_dir: Path,
+    *,
+    bdinfo_report: Path | None = None,
+    bdinfo_exe: str | None = None,
+    bdinfo_playlist: str | None = None,
+) -> tuple[str, str, Path, str]:
+    """Choose MediaInfo for files/DVD and BDInfo for Blu-ray ISO."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    bluray_iso = path.suffix.casefold() == ".iso" and "BLURAY" in source.replace(" ", "").upper()
+    if not bluray_iso:
+        if bdinfo_report or bdinfo_exe or bdinfo_playlist:
+            raise ValueError("--bdinfo-* 参数只适用于 Blu-ray/UHD ISO")
+        media_text_path = output_dir / "mediainfo.txt"
+        media_text = read_mediainfo_text(path, display_name)
+        media_text_path.write_text(media_text, encoding="utf-8")
+        return "MediaInfo", media_text, media_text_path, ""
+
+    if bdinfo_report:
+        bdinfo_text = read_bdinfo_report(bdinfo_report.resolve())
+        bdinfo_path = output_dir / "bdinfo.txt"
+        bdinfo_path.write_text(bdinfo_text, encoding="utf-8")
+        playlist_match = re.search(r"(?:PLAYLIST:|Name:)\s*(\d{5})\.MPLS", bdinfo_text, re.I)
+        return "BDInfo", bdinfo_text, bdinfo_path, playlist_match.group(1) if playlist_match else ""
+
+    bdinfo_text, bdinfo_path, selected = generate_bdinfo_report(
+        path,
+        output_dir,
+        executable=bdinfo_exe,
+        playlist=bdinfo_playlist,
+    )
+    return "BDInfo", bdinfo_text, bdinfo_path, selected
+
+
 def _extract_screenshots(video: Path, output: Path, count: int) -> None:
     from random_video_screenshots.cli import extract_screenshots
 
@@ -549,7 +719,7 @@ def _manual_douban(url: str) -> DoubanMatch:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="生成 M-Team 发布资料包、V1 私有种子、MediaInfo Text 和 4 张截图")
+    parser = argparse.ArgumentParser(description="生成 M-Team 发布资料包、V1 私有种子、MediaInfo/BDInfo Text 和 4 张截图")
     parser.add_argument("input", type=Path, help="单个视频/ISO，或剧集所在文件夹")
     parser.add_argument("--apply", action="store_true", help="资料准备成功后执行规范重命名")
     parser.add_argument("--recursive", action="store_true", help=argparse.SUPPRESS)
@@ -566,6 +736,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tmdb-id", type=int, help="手工指定 TMDB ID")
     parser.add_argument("--douban-url", help="手工指定豆瓣链接，并跳过自动查找")
     parser.add_argument("--offline", action="store_true", help="不访问 TMDB 和豆瓣；通常需同时给 --douban-url")
+    parser.add_argument("--bdinfo-report", type=Path, help="Blu-ray ISO 已有的 BDInfo Text 报告")
+    parser.add_argument("--bdinfo-exe", help="BDInfo CLI 路径；默认查找 bdinfo-rs 或读取 BDINFO_PATH")
+    parser.add_argument("--bdinfo-playlist", help="Blu-ray 主播放列表，如 00005；默认自动选择最长项")
     parser.add_argument("--category", choices=MTEAM_CATEGORIES, help="覆盖自动推断的 M-Team 分类")
     parser.add_argument("--animation", action="store_true", help="按动画分类；有 TMDB 时也会自动识别动画类型")
     parser.add_argument("--screenshots", type=int, default=4, help="本地截图数量，默认 4")
@@ -1031,9 +1204,15 @@ def main(argv: list[str] | None = None) -> Path | None:
         output_dir = (args.output or target.with_suffix(".prepare")).resolve()
         screenshots_dir = output_dir / "screenshots"
         output_dir.mkdir(parents=True, exist_ok=True)
-        media_text = read_mediainfo_text(path, target.name)
-        media_text_path = output_dir / "mediainfo.txt"
-        media_text_path.write_text(media_text, encoding="utf-8")
+        technical_info_type, media_text, media_text_path, bdinfo_playlist = prepare_technical_info(
+            path,
+            target.name,
+            source,
+            output_dir,
+            bdinfo_report=args.bdinfo_report,
+            bdinfo_exe=args.bdinfo_exe,
+            bdinfo_playlist=args.bdinfo_playlist,
+        )
 
         screenshot_paths: list[Path] = []
         if not args.skip_screenshots:
@@ -1074,6 +1253,10 @@ def main(argv: list[str] | None = None) -> Path | None:
             "imdb_url": imdb_url,
             "source_language": LANGUAGE_NAMES.get(language_code.lower(), language_code),
             "media": asdict(media),
+            "technical_info_type": technical_info_type,
+            "technical_info_text": media_text,
+            "technical_info_path": str(media_text_path),
+            "bdinfo_playlist": bdinfo_playlist,
             "mediainfo_text": media_text,
             "mediainfo_path": str(media_text_path),
             "screenshots": [str(item) for item in screenshot_paths],
@@ -1096,7 +1279,7 @@ def main(argv: list[str] | None = None) -> Path | None:
         print(f"  副标题：{subtitle or '未识别'}")
         print(f"  分类：{category}")
         print(f"  豆瓣：{douban.url if douban else '未找到，请手工补充'}")
-        print(f"  MediaInfo：{media_text_path}")
+        print(f"  {technical_info_type}：{media_text_path}")
         print(f"  截图：{len(screenshot_paths)} 张")
         if not args.skip_torrent:
             print(f"  V1 私有种子：{torrent_path}")

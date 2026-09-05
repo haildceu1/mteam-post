@@ -26,6 +26,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.set_defaults(upload=True)
     parser.add_argument("--yes", action="store_true", help="跳过发布页写入/上传前的确认")
     parser.add_argument("--keep-open", action="store_true", help="填表后保持 ChromeDriver 窗口打开")
+    parser.add_argument("--login-timeout", type=int, default=600, help="等待手工登录的秒数；默认 600")
     return parser
 
 
@@ -56,6 +57,7 @@ def main(argv: list[str] | None = None) -> None:
         fill_args.append("--yes")
     if args.keep_open:
         fill_args.append("--keep-open")
+    fill_args.extend(["--login-timeout", str(args.login_timeout)])
     mteam_fill_main(fill_args)
 
 

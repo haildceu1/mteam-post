@@ -2,10 +2,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from media_title_renamer.mteam_fill import load_mteam_session
+from media_title_renamer.mteam_fill import _has_mteam_auth, _wait_for_mteam_auth, load_mteam_session
 
 
 class MTeamFillTests(unittest.TestCase):
+    def test_login_wait_accepts_existing_local_storage_auth(self):
+        class Driver:
+            def execute_script(self, _script):
+                return "saved-token"
+
+        driver = Driver()
+        self.assertTrue(_has_mteam_auth(driver))
+        self.assertTrue(_wait_for_mteam_auth(driver, 0))
+
     def test_parses_devtools_request_header_dump_as_local_storage_session(self):
         text = "\n".join(
             [

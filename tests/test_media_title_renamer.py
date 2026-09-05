@@ -175,6 +175,14 @@ class MediaTitleRenamerTests(unittest.TestCase):
             "Sherlock, Jr 1924 MOC BluRay 1080p AVC LPCM2.0-smwy8888",
         )
 
+    def test_group_name_may_contain_at_sign(self):
+        path = Path(
+            "Everything.Everywhere.All.at.Once.2022.ITA.UHD.BluRay.2160p.HEVC.TrueHD.7.1-DiY@HDHome.iso"
+        )
+        media = inspect_media_from_filename(path)
+        hints = filename_hints(path, media)
+        self.assertEqual(hints.group, "DiY@HDHome")
+
 
 if __name__ == "__main__":
     unittest.main()

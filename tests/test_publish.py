@@ -38,6 +38,8 @@ class PublishTests(unittest.TestCase):
                 "https://kp.m-team.cc/upload",
                 "--upload",
                 "--keep-open",
+                "--login-timeout",
+                "600",
             ]
         )
 
