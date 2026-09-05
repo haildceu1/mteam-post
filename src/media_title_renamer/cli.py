@@ -427,15 +427,19 @@ def _strip_group(stem: str) -> tuple[str, str | None]:
 def _normalise_episode(value: str) -> str:
     value = re.sub(r"[ ._]", "", value.upper())
     value = re.sub(r"^(S\d{1,2})-E", r"\1E", value)
-    match = re.fullmatch(r"S(\d{1,2})(?:E(\d{1,3})(?:-?E?(\d{1,3}))?)?", value)
+    match = re.fullmatch(r"S(\d{1,2})(.*)", value)
     if not match:
         return value
-    season, first, last = match.groups()
+    season, episode_part = match.groups()
     result = f"S{int(season):02d}"
-    if first:
-        result += f"E{int(first):02d}"
-    if last:
-        result += f"-E{int(last):02d}"
+    if not episode_part:
+        return result
+    if not re.fullmatch(r"E\d{1,3}(?:(?:-?E?|TOE?)\d{1,3})*", episode_part):
+        return value
+    episodes = [int(number) for number in re.findall(r"\d{1,3}", episode_part)]
+    result += f"E{episodes[0]:02d}"
+    if len(episodes) > 1:
+        result += f"-E{episodes[-1]:02d}"
     return result
 
 
@@ -443,7 +447,7 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
     stem, group = _strip_group(path.stem)
     searchable = stem.replace("_", " ").replace(".", " ")
     year_match = re.search(r"\b((?:19|20)\d{2})\b", searchable)
-    episode_pattern = r"\bS\d{1,2}(?:[ ._-]*E\d{1,3}(?:[ ._]*(?:-|TO)[ ._]*E?\d{1,3})?)?\b"
+    episode_pattern = r"\bS\d{1,2}(?:[ ._-]*E\d{1,3}(?:[ ._]*(?:(?:-|TO)[ ._]*E?|E)\d{1,3})*)?\b"
     episode_match = re.search(episode_pattern, searchable, re.I)
 
     technical_pattern = (

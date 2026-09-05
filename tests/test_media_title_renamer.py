@@ -92,6 +92,17 @@ class MediaTitleRenamerTests(unittest.TestCase):
         self.assertEqual(hints.platform, "Netflix")
         self.assertEqual(hints.group, "GRP")
 
+    def test_consecutive_multi_episode_notation_is_normalized(self):
+        examples = {
+            "The.Office.US.S03E12E13.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-NOGRP.mkv": "S03E12-E13",
+            "The.Office.US.S07E25E26.Search.Committee.EXTENDED.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-NOGRP.mkv": "S07E25-E26",
+        }
+        for filename, expected in examples.items():
+            with self.subTest(filename=filename):
+                hints = filename_hints(Path(filename))
+                self.assertEqual(hints.episode, expected)
+                self.assertEqual(hints.group, "NOGRP")
+
     def test_dotted_episode_interlaced_scan_and_by_group(self):
         data = media_json(audio_format="AC-3", audio_profile="", audio_bitrate="384000")
         data["media"]["track"][1].update({"ScanType": "Interlaced", "ScanOrder": "TFF", "FrameRate": "25.000"})
