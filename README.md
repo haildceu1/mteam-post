@@ -147,7 +147,7 @@ media-title-rename prepare "F:\20.22\20.22.s01.E01.(2024).HDTV (1080i).by.Romano
 # 全部资料成功后，同时执行规范重命名
 media-title-rename prepare "F:\Videos\Example.ts" --apply
 
-# 整季剧集：识别每集的 SxxExx，生成一个多文件种子，并整批改名
+# 整季剧集：识别每集的 SxxExx，只探测第一集，生成一个多文件种子，并整批改名
 media-title-rename prepare "F:\20.22" --apply
 
 # 分季放在子目录也会自动递归处理
@@ -162,7 +162,7 @@ media-title-rename prepare "F:\Videos\Example.ts" `
 
 种子配置与 qBittorrent 图示一致：V1、自动分块、`private=1`，Tracker URL、Web 种子、注释和 `source` 默认留空。种子中的文件名使用规范新名称；不带 `--apply` 时源文件保持原名，因此正式做种前应确认并执行重命名。
 
-文件夹模式专用于剧集：它会先检查全部目标文件名，任何一集缺少 `SxxExx` 或发生重名时都不会改动任何文件。TMDB/豆瓣只查询一次，MediaInfo 则逐集保存；默认的 4 张截图会尽量均匀选自不同集。最终生成一个 V1 私有多文件种子，种子根目录保留原文件夹名，只重命名其中的视频文件。
+文件夹模式专用于剧集：它会先检查全部目标文件名，任何一集缺少 `SxxExx` 或发生重名时都不会改动任何文件。文件按季集号排序后只探测第一集（例如 `S01E01`）并生成一份 MediaInfo Text，其分辨率、视频编码和音频参数会用于整季重命名及发布页；TMDB/豆瓣也只查询一次。默认的 4 张截图仍会尽量均匀选自不同集。最终生成一个 V1 私有多文件种子，种子根目录保留原文件夹名，只重命名其中的视频文件。
 
 ### TMDB 名称增强
 

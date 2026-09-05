@@ -892,22 +892,24 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     if not paths:
         raise ValueError("目录中没有找到支持的视频文件")
 
-    probes: list[tuple[Path, MediaInfo, FilenameHints]] = []
+    probes: list[tuple[Path, FilenameHints]] = []
     missing_episodes: list[Path] = []
-    print(f"正在读取剧集文件：共 {len(paths)} 个")
+    print(f"正在扫描剧集文件名：共 {len(paths)} 个")
     for path in paths:
-        media = read_mediainfo(path)
-        hints = filename_hints(path, media)
-        probes.append((path, media, hints))
+        hints = filename_hints(path)
+        probes.append((path, hints))
         if not hints.episode:
             missing_episodes.append(path)
     if missing_episodes:
         examples = "；".join(str(path.relative_to(root)) for path in missing_episodes[:8])
         extra = f"（另有 {len(missing_episodes) - 8} 个）" if len(missing_episodes) > 8 else ""
         raise ValueError(f"以下文件无法识别 SxxExx 季集号，未改名：{examples}{extra}")
-    probes.sort(key=lambda item: (*_episode_sort_key(item[2].episode or ""), str(item[0]).casefold()))
+    probes.sort(key=lambda item: (*_episode_sort_key(item[1].episode or ""), str(item[0]).casefold()))
 
-    first_path, first_media, _first_hints = probes[0]
+    first_path, _first_hints = probes[0]
+    print(f"正在探测代表集 MediaInfo：{first_path.relative_to(root)}（其余 {len(paths) - 1} 集复用）")
+    first_media = read_mediainfo(first_path)
+    probes[0] = (first_path, filename_hints(first_path, first_media))
     shared_args = argparse.Namespace(**vars(args))
     shared_args.kind = "tv"
     shared_args.episode = None
@@ -919,7 +921,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     year = args.year or (tmdb.year if tmdb and tmdb.year else year)
 
     provisional: list[FolderPlan] = []
-    for path, initial_media, hints in probes:
+    for path, hints in probes:
         source = None if args.source == "auto" else _canonical_source(args.source)
         source = _canonical_source(source or hints.source or common_source) or ""
         if not source:
@@ -928,8 +930,8 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         platform = args.platform if args.platform is not None else (hints.platform or common_platform)
         media = MediaInfo(
             **{
-                **initial_media.__dict__,
-                "video_codec": _video_codec(initial_media.video_format, initial_media.writing_library, source),
+                **first_media.__dict__,
+                "video_codec": _video_codec(first_media.video_format, first_media.writing_library, source),
             }
         )
         episode = hints.episode or ""
@@ -986,13 +988,6 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         platform=representative.platform,
         include_audio_count=args.audio_count,
     )
-    technical_profiles = {
-        (plan.source, plan.media.resolution, plan.media.video_codec, plan.media.audio_codec, plan.media.audio_channels)
-        for plan in provisional
-    }
-    if len(technical_profiles) > 1:
-        print("警告：各集技术规格不完全一致，整季标题和发布页字段将以第一集为准。")
-
     douban = _douban_for_release(args, tmdb=tmdb, title=title, base_title=base_title, year=year)
     language_code = (tmdb.original_language if tmdb else "") or representative.media.audio_language
     subtitle = build_subtitle(
@@ -1010,13 +1005,12 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     )
 
     output_dir = (args.output or root.parent / f"{pack_title}.prepare").resolve()
-    media_dir = output_dir / "mediainfo"
-    media_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    media_text = read_mediainfo_text(representative.source_path, representative.target_path.name)
+    media_path = output_dir / "mediainfo.txt"
+    media_path.write_text(media_text, encoding="utf-8")
     file_records: list[dict[str, Any]] = []
     for index, plan in enumerate(provisional, start=1):
-        media_text = read_mediainfo_text(plan.source_path, plan.target_path.name)
-        media_path = media_dir / f"{index:03d} {plan.target_path.stem}.txt"
-        media_path.write_text(media_text, encoding="utf-8")
         file_records.append(
             {
                 "source_path": str(plan.source_path),
@@ -1027,8 +1021,9 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
                 "source": plan.source,
                 "group": plan.group or "",
                 "media": asdict(plan.media),
-                "mediainfo_path": str(media_path),
-                "mediainfo_text": media_text,
+                "mediainfo_path": str(media_path) if index == 1 else "",
+                "mediainfo_text": media_text if index == 1 else "",
+                "media_inherited_from": str(representative.source_path),
             }
         )
 
@@ -1053,7 +1048,6 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         piece_length = create_private_v1_folder_torrent(root, torrent_files, torrent_path, root.name)
 
     imdb_url = f"https://www.imdb.com/title/{tmdb.imdb_id}/" if tmdb and tmdb.imdb_id else ""
-    first_record = file_records[0]
     payload = {
         "schema_version": 1,
         "created_at": int(time.time()),
@@ -1074,8 +1068,9 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         "imdb_url": imdb_url,
         "source_language": LANGUAGE_NAMES.get(language_code.lower(), language_code),
         "media": asdict(representative.media),
-        "mediainfo_text": first_record["mediainfo_text"],
-        "mediainfo_path": first_record["mediainfo_path"],
+        "media_probe_path": str(representative.source_path),
+        "mediainfo_text": media_text,
+        "mediainfo_path": str(media_path),
         "files": file_records,
         "screenshots": [str(item) for item in screenshot_paths],
         "torrent": {
@@ -1108,7 +1103,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     print(f"  副标题：{subtitle or '未识别'}")
     print(f"  分类：{category}")
     print(f"  豆瓣：{douban.url if douban else '未找到，请手工补充'}")
-    print(f"  MediaInfo：{len(file_records)} 份（发布页默认使用第一集）")
+    print(f"  MediaInfo：1 份（探测 {representative.source_path.relative_to(root)}）")
     print(f"  截图：{len(screenshot_paths)} 张")
     if not args.skip_torrent:
         print(f"  V1 私有多文件种子：{torrent_path}")

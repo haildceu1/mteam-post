@@ -1,7 +1,11 @@
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+from media_title_renamer.cli import MediaInfo
 
 from media_title_renamer.prepare import (
     DoubanMatch,
@@ -11,6 +15,7 @@ from media_title_renamer.prepare import (
     create_private_v1_folder_torrent,
     create_private_v1_torrent,
     infer_mteam_category,
+    main as prepare_main,
     prepare_technical_info,
     read_bdinfo_report,
     select_longest_bdinfo_playlist,
@@ -18,6 +23,56 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    @patch("media_title_renamer.prepare.read_mediainfo_text", return_value="General\nComplete name : E01.mkv\n")
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    def test_tv_folder_probes_only_the_first_episode(self, read_mediainfo, read_mediainfo_text):
+        read_mediainfo.return_value = MediaInfo(
+            width=1920,
+            height=1080,
+            resolution="1080p",
+            video_format="AVC",
+            writing_library="",
+            video_codec="AVC",
+            hdr=(),
+            hfr=None,
+            audio_codec="DD",
+            audio_channels="5.1",
+            audio_tracks=1,
+            audio_bitrate=640000,
+            audio_language="en",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Example Show"
+            root.mkdir()
+            second = root / "Example.Show.S01E02.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
+            first = root / "Example.Show.S01E01.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
+            second.write_bytes(b"episode two")
+            first.write_bytes(b"episode one")
+            package_path = prepare_main(
+                [
+                    str(root),
+                    "--title",
+                    "Example Show",
+                    "--year",
+                    "2024",
+                    "--source",
+                    "WEB-DL",
+                    "--offline",
+                    "--douban-url",
+                    "https://movie.douban.com/subject/1/",
+                    "--skip-screenshots",
+                    "--skip-torrent",
+                ]
+            )
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+
+        read_mediainfo.assert_called_once_with(first)
+        self.assertEqual(read_mediainfo_text.call_count, 1)
+        self.assertTrue(package["media_probe_path"].endswith("S01E01.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"))
+        self.assertEqual(len(package["files"]), 2)
+        self.assertTrue(package["files"][0]["mediainfo_text"])
+        self.assertFalse(package["files"][1]["mediainfo_text"])
+
     def test_v1_torrent_is_private_and_has_no_tracker_or_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
