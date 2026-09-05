@@ -69,7 +69,8 @@ class PrepareTests(unittest.TestCase):
                 )
             package = json.loads(package_path.read_text(encoding="utf-8"))
 
-        read_mediainfo.assert_called_once_with(first)
+        read_mediainfo.assert_called_once()
+        self.assertEqual(read_mediainfo.call_args.args[0].name, first.name)
         self.assertEqual(read_mediainfo_text.call_count, 1)
         self.assertTrue(package["media_probe_path"].endswith("S01E01.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"))
         self.assertEqual(len(package["files"]), 2)
