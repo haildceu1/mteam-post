@@ -96,7 +96,7 @@ media-title-rename publish "F:\TV\20.22" `
   --keep-open
 ```
 
-单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并将截图追加在简介末尾。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。`publish` 的 Chrome 配置目录按以下顺序自动选择：环境变量 `MTEAM_PROFILE_DIR`、本机已有的 `D:\Cinema\mteam`、最后是 `%LOCALAPPDATA%\mteam-post\chrome-profile`；通常无需再写 `--profile-dir`，仍可用该参数临时覆盖。
+单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并在简介末尾自动回车两次后追加截图。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。`publish` 的 Chrome 配置目录按以下顺序自动选择：环境变量 `MTEAM_PROFILE_DIR`、本机已有的 `D:\Cinema\mteam`、最后是 `%LOCALAPPDATA%\mteam-post\chrome-profile`；通常无需再写 `--profile-dir`，仍可用该参数临时覆盖。
 
 升级项目时执行：
 

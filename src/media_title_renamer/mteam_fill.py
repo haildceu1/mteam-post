@@ -335,6 +335,22 @@ def _move_editor_caret_to_end(driver) -> bool:
     )
 
 
+def _append_editor_image_spacing(driver, count: int = 2) -> bool:
+    """Move to the end of the introduction and press Enter before images."""
+    if not _move_editor_caret_to_end(driver):
+        return False
+    try:
+        editor = driver.find_element(
+            "css selector", '[contenteditable="true"][data-lexical-editor]'
+        )
+        # Selenium's WebDriver Enter key. Sending the special key instead of
+        # mutating innerHTML lets Lexical update its internal editor state.
+        editor.send_keys("\ue007" * count)
+    except Exception:
+        return False
+    return True
+
+
 def _select_category(driver, category: str) -> bool:
     select = driver.execute_script(
         """
@@ -472,8 +488,8 @@ def _fill_page(driver, package: dict[str, object], *, upload: bool) -> None:
     if screenshots:
         # M-Team opens the editor's image-upload dialog lazily; clicking the
         # image toolbar button creates a hidden multi-file input.
-        if not _move_editor_caret_to_end(driver):
-            print("提示：找不到简介编辑器，请手工上传截图。")
+        if not _append_editor_image_spacing(driver, count=2):
+            print("提示：无法在简介末尾插入两个空行，请手工回车两次后上传截图。")
             return
         opened = driver.execute_script(
             """

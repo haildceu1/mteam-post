@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from media_title_renamer.mteam_fill import (
+    _append_editor_image_spacing,
     _has_mteam_auth,
     _is_login_url,
     _parser,
@@ -12,6 +13,33 @@ from media_title_renamer.mteam_fill import (
 
 
 class MTeamFillTests(unittest.TestCase):
+    def test_two_enters_are_inserted_before_editor_images(self):
+        class Editor:
+            def __init__(self):
+                self.keys = ""
+
+            def send_keys(self, keys):
+                self.keys += keys
+
+        class Driver:
+            def __init__(self):
+                self.editor = Editor()
+
+            def execute_script(self, _script):
+                return True
+
+            def find_element(self, by, selector):
+                self.assertion = (by, selector)
+                return self.editor
+
+        driver = Driver()
+        self.assertTrue(_append_editor_image_spacing(driver))
+        self.assertEqual(driver.editor.keys, "\ue007\ue007")
+        self.assertEqual(
+            driver.assertion,
+            ("css selector", '[contenteditable="true"][data-lexical-editor]'),
+        )
+
     def test_default_url_is_upload_page(self):
         self.assertEqual(_parser().parse_args([]).url, "https://kp.m-team.cc/upload")
 
