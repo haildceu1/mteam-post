@@ -22,6 +22,8 @@ Selenium 会自动寻找或下载与 Chrome 匹配的 ChromeDriver，一般不�
 winget install agentjp.bdinfo-rs
 ```
 
+`winget` 安装完成后会更新用户 PATH，但已经打开的 PowerShell 不会自动刷新。请关闭并重新打开终端，再运行 `bdinfo-rs --version`；当前项目已适配 `bdinfo-rs 4.0.0`。
+
 在 PowerShell 中检查：
 
 ```powershell
@@ -123,6 +125,9 @@ media-title-rename "D:\Sandra 1965 DVDiSo 576p MPEG-2 DD.iso"
 
 # 蓝光 ISO：MediaInfo 无法展开轨道时，从规范文件名回填参数并保留 MOC
 media-title-rename "E:\Movie\Sherlock, Jr 1924 MOC Blu-ray 1080p AVC LPCM 2.0-smwy8888.iso"
+
+# 4K 蓝光 ISO：4K 会规范为 2160p，x265 轨道会规范为 HEVC，但 ISO 仍按 UHD BluRay 原盘处理
+media-title-rename "D:\Movie\Sympathy for Mr Vengeance 2002 4K BluRay x265 DTS-HD.MA.5.1-fda80@CHDBits.iso"
 ```
 
 输入目录时会自动递归发现所有子目录中的视频，无需额外参数；确认预览结果无误后再添加 `--apply`。脚本会在执行前检查重名和已存在目标，任何冲突都会阻止整批改名。
@@ -263,7 +268,17 @@ media-title-rename prepare "E:\Movie\Disc.iso" --screenshot-source "M:\BDMV\STRE
 
 ### 蓝光 ISO 的 BDInfo
 
-Blu-ray/UHD ISO 不再把 ISO 容器的简略 MediaInfo 填入发布页，而是调用 `bdinfo-rs`：先列出播放列表，默认选择时长最长的一项，再完整扫描并保存经典 BDInfo Text。已知主播放列表时可明确指定：
+Blu-ray/UHD ISO 不再把 ISO 容器的简略 MediaInfo 填入发布页，而是调用 `bdinfo-rs`：先列出播放列表，默认选择时长最长的一项，再完整扫描并保存经典 BDInfo Text。
+
+带有 `4K` 标记的 ISO 会自动使用 `2160p`；文件名中的 `x265` 会作为 HEVC 视频轨信息，但不会把完整 ISO 误判成 BDRip。PowerShell 双引号路径中的 `@` 不需要转义，也不要写成 `\@`。例如：
+
+```powershell
+media-title-rename prepare "D:\W-我要复仇-2002-[tmdb=4689]\我要复仇 (2002) - 4K - BluRay - x265 - DTS-HD.MA.5.1 - fda80@CHDBits.iso" `
+  --apply `
+  --tmdb-id 4689
+```
+
+已知主播放列表时可明确指定：
 
 ```powershell
 media-title-rename publish "D:\Movie\Disc.iso" `
@@ -284,3 +299,60 @@ media-title-rename publish "D:\Movie\Disc.iso" `
 ```
 
 `D:\Cinema\tools\BDInfo\BDInfo.exe` 这类 WinForms 图形版不能静默操作；它生成的报告请通过 `--bdinfo-report` 使用。也可以用 `--bdinfo-exe` 或环境变量 `BDINFO_PATH` 指向其他兼容的 BDInfo CLI。
+
+## 常见故障排查
+
+### `prepare` 不接受 `--profile-dir`
+
+`prepare` 只在本地生成技术信息、截图、种子和 JSON，不会打开浏览器，因此没有 `--profile-dir` 参数。需要直接填写 M-Team 发布页时使用：
+
+```powershell
+media-title-rename publish "D:\Movie\Disc.iso" `
+  --apply `
+  --profile-dir "D:\Cinema\mteam"
+```
+
+如果已经完成 `prepare`，可传入现有资料包，避免重新扫描和哈希：
+
+```powershell
+media-title-rename publish "D:\Movie\Disc.prepare\mteam-prepare.json" `
+  --profile-dir "D:\Cinema\mteam"
+```
+
+### `Blu-ray ISO 必须使用 BDInfo`
+
+先安装并重新打开 PowerShell：
+
+```powershell
+winget install agentjp.bdinfo-rs
+bdinfo-rs --version
+```
+
+若不方便重启终端，可以暂时用 `--bdinfo-exe "bdinfo-rs.exe 的完整路径"`。已有图形版 BDInfo Text 报告时则使用 `--bdinfo-report`。
+
+### `REPORT_DEST must be given if BD_PATH is an ISO`
+
+这是旧版 `mteam-post` 调用 `bdinfo-rs 4.0.0` 时缺少 ISO 报告目录造成的。`0.8.2` 起已自动传入 `.prepare` 输出目录。进入项目目录并升级：
+
+```powershell
+git pull
+python -m pip install -e .
+```
+
+升级后直接重新执行原来的 `prepare` 或 `publish` 命令；失败时留下的 `.prepare` 目录无需手工删除。
+
+### `TMDB 查询失败：<urlopen error timed out>`
+
+这表示连接 TMDB 超时，通常不是 Token 类型或密钥错误；错误 Token 一般会返回 HTTP 401。可稍后重试，并用 `--tmdb-id 4689` 明确指定条目。无法访问 TMDB 时程序会回退到文件名和豆瓣结果，也可使用 `--offline` 禁止联网查询。
+
+### PowerShell 路径中包含 `@`
+
+双引号中的 `@` 是普通字符，不要在它前面添加反斜杠：
+
+```powershell
+# 正确
+"D:\Movie\Film-fda80@CHDBits.iso"
+
+# 错误：会被当成多一级目录
+"D:\Movie\Film-fda80\@CHDBits.iso"
+```
