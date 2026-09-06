@@ -194,6 +194,20 @@ class MediaTitleRenamerTests(unittest.TestCase):
         hints = filename_hints(path, media)
         self.assertEqual(hints.group, "DiY@HDHome")
 
+    def test_4k_bluray_iso_maps_to_2160p_disc_and_uses_hevc(self):
+        path = Path(
+            "我要复仇 (2002) - 4K - BluRay - x265 - DTS-HD.MA.5.1 - fda80@CHDBits.iso"
+        )
+        media = inspect_media_from_filename(path)
+        hints = filename_hints(path, media)
+        self.assertEqual(media.resolution, "2160p")
+        self.assertEqual(media.video_format, "HEVC")
+        self.assertEqual(media.audio_codec, "DTS-HD MA")
+        self.assertEqual(media.audio_channels, "5.1")
+        self.assertEqual(hints.source, "UHD BluRay")
+        self.assertIsNone(hints.edition)
+        self.assertEqual(hints.group, "fda80@CHDBits")
+
 
 if __name__ == "__main__":
     unittest.main()

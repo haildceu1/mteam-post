@@ -387,6 +387,11 @@ def _infer_source(
     if is_bdrip:
         return "UHD BluRay BDRip" if is_uhd else "BluRay BDRip"
     if is_blu_ray:
+        # An ISO is a complete authored disc image. Codec-looking filename
+        # tags such as x265 describe its HEVC stream and must not turn it into
+        # a BDRip encode, otherwise prepare would incorrectly skip BDInfo.
+        if extension.lower() == ".iso":
+            return "UHD BluRay" if is_uhd else "BluRay"
         # An explicit x264/x265 writing library proves this is an encode rather
         # than a disc/REMUX, even when the source filename omitted BDRip.
         library = (media.writing_library if media else "").upper()
@@ -418,7 +423,7 @@ def _strip_group(stem: str) -> tuple[str, str | None]:
     if not separators:
         return stem, None
     separator = separators[0]
-    candidate = stem[separator + 1 :]
+    candidate = stem[separator + 1 :].strip(" ._-")
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._&@ -]*", candidate):
         return stem[:separator], candidate
     return stem, None
@@ -451,7 +456,7 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
     episode_match = re.search(episode_pattern, searchable, re.I)
 
     technical_pattern = (
-        r"\b(?:4320[pi]|2160[pi]|1440[pi]|1080[pi]|720[pi]|576[pi]|480[pi]|UHD|BLU[ .-]?RAY|BDRIP|REMUX|"
+        r"\b(?:4320[pi]|2160[pi]|1440[pi]|1080[pi]|720[pi]|576[pi]|480[pi]|4K|UHD|BLU[ .-]?RAY|BDRIP|REMUX|"
         r"WEB[ .-]?DL|HDTV|DVD(?:ISO|RIP)?|AVC|HEVC|X26[45]|H[ .]?26[45]|MPEG[ .-]?2|"
         r"HDR(?:10\+)?|DOVI|DV|DTS|TRUEHD|DDP|DD|AAC|FLAC|LPCM|PCM)\b"
     )
@@ -460,7 +465,7 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
     for pattern in (
         r"\b(?:19|20)\d{2}\b",
         episode_pattern,
-        r"\b(?:4320|2160|1440|1080|720|576|480)[pi]\b",
+        r"\b(?:(?:4320|2160|1440|1080|720|576|480)[pi]|4K)\b",
         technical_pattern,
     ):
         match = re.search(pattern, searchable, re.I)
@@ -475,7 +480,7 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
         next_technical = re.search(technical_pattern, following, re.I)
         if next_technical:
             candidate = _clean_title(following[: next_technical.start()])
-            edition = candidate or None
+            edition = candidate if candidate and re.search(r"\w", candidate) else None
 
     try:
         file_size = path.stat().st_size
@@ -494,6 +499,8 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
 
 
 def _filename_resolution(stem: str) -> tuple[int, int, str]:
+    if re.search(r"\b4K\b", stem, re.I):
+        return 3840, 2160, "2160p"
     match = re.search(r"\b(4320|2160|1440|1080|720|576|480)([pi])\b", stem, re.I)
     if not match:
         return 0, 0, "未知分辨率"
