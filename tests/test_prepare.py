@@ -12,6 +12,7 @@ from media_title_renamer.cli import MediaInfo
 from media_title_renamer.prepare import (
     DoubanMatch,
     TmdbMatch,
+    _extract_screenshots,
     automatic_piece_length,
     build_subtitle,
     create_private_v1_folder_torrent,
@@ -25,6 +26,23 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    @patch("random_video_screenshots.cli.extract_screenshots")
+    def test_screenshot_result_excludes_stale_files(self, extract_screenshots):
+        def create_new_file(_video, output, *, count):
+            self.assertEqual(count, 1)
+            output.mkdir(parents=True, exist_ok=True)
+            (output / "new.jpg").write_bytes(b"new")
+
+        extract_screenshots.side_effect = create_new_file
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "screenshots"
+            output.mkdir()
+            (output / "old.jpg").write_bytes(b"old")
+            generated = _extract_screenshots(root / "video.mkv", output, 1)
+
+        self.assertEqual([item.name for item in generated], ["new.jpg"])
+
     @patch("media_title_renamer.prepare.read_mediainfo_text", return_value="General\nComplete name : E01.mkv\n")
     @patch("media_title_renamer.prepare.read_mediainfo")
     def test_tv_folder_probes_only_the_first_episode(self, read_mediainfo, read_mediainfo_text):

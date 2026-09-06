@@ -640,10 +640,23 @@ def prepare_technical_info(
     return "BDInfo", bdinfo_text, bdinfo_path, selected
 
 
-def _extract_screenshots(video: Path, output: Path, count: int) -> None:
+def _extract_screenshots(video: Path, output: Path, count: int) -> list[Path]:
     from random_video_screenshots.cli import extract_screenshots
 
+    before = {
+        item.resolve(): (item.stat().st_mtime_ns, item.stat().st_size)
+        for item in output.glob("*")
+        if item.is_file()
+    }
     extract_screenshots(video, output, count=count)
+    generated: list[Path] = []
+    for item in output.glob("*"):
+        if not item.is_file():
+            continue
+        signature = (item.stat().st_mtime_ns, item.stat().st_size)
+        if before.get(item.resolve()) != signature:
+            generated.append(item)
+    return sorted(generated)
 
 
 def _mount_iso(path: Path) -> tuple[Path, bool]:
@@ -853,8 +866,7 @@ def _folder_screenshots(
         return []
     if override:
         with screenshot_source(plans[0].source_path, override) as source_for_screenshots:
-            _extract_screenshots(source_for_screenshots, output, count=count)
-        return sorted(item for item in output.glob("*") if item.is_file())
+            return _extract_screenshots(source_for_screenshots, output, count=count)
 
     selected_count = min(count, len(plans))
     if selected_count == 1:
@@ -863,11 +875,12 @@ def _folder_screenshots(
         indexes = [round(index * (len(plans) - 1) / (selected_count - 1)) for index in range(selected_count)]
         selected = [plans[index] for index in indexes]
     base_count, remainder = divmod(count, len(selected))
+    generated: list[Path] = []
     for index, plan in enumerate(selected):
         item_count = base_count + (1 if index < remainder else 0)
         with screenshot_source(plan.source_path) as source_for_screenshots:
-            _extract_screenshots(source_for_screenshots, output, count=item_count)
-    return sorted(item for item in output.glob("*") if item.is_file())
+            generated.extend(_extract_screenshots(source_for_screenshots, output, count=item_count))
+    return sorted(generated)
 
 
 def _apply_folder_renames(plans: list[FolderPlan]) -> None:
@@ -1231,8 +1244,11 @@ def main(argv: list[str] | None = None) -> Path | None:
             if args.screenshots != 4:
                 print(f"提示：当前要求为 4 张截图，本次按参数生成 {args.screenshots} 张。")
             with screenshot_source(path, args.screenshot_source) as source_for_screenshots:
-                _extract_screenshots(source_for_screenshots, screenshots_dir, count=args.screenshots)
-            screenshot_paths = sorted(item for item in screenshots_dir.glob("*") if item.is_file())
+                screenshot_paths = _extract_screenshots(
+                    source_for_screenshots,
+                    screenshots_dir,
+                    count=args.screenshots,
+                )
 
         torrent_path = output_dir / f"{target.stem}.torrent"
         piece_length = 0

@@ -178,6 +178,32 @@ def _wait_for_mteam_auth(driver, timeout_seconds: int) -> bool:
     return False
 
 
+def _is_login_url(url: str) -> bool:
+    return urlsplit(url).path.rstrip("/").casefold().endswith("/login")
+
+
+def _wait_for_publish_page(driver, target_url: str, timeout_seconds: int) -> bool:
+    """Wait for an expired stored token to be replaced by a real login."""
+    deadline = time.monotonic() + max(timeout_seconds, 0)
+    announced = False
+    while True:
+        if not _is_login_url(driver.current_url):
+            if driver.current_url.rstrip("/") != target_url.rstrip("/"):
+                driver.get(target_url)
+                time.sleep(2)
+            if not _is_login_url(driver.current_url):
+                return True
+        if time.monotonic() >= deadline:
+            return False
+        if not announced:
+            print(
+                "保存的 M-Team 登录状态已过期，请在已打开的 ChromeDriver 窗口中重新登录；"
+                f"程序最长等待 {timeout_seconds} 秒，登录成功后会自动打开发布页。"
+            )
+            announced = True
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+
+
 def _set_react_value(driver, element, value: str) -> None:
     driver.execute_script(
         """
@@ -552,6 +578,8 @@ def main(argv: list[str] | None = None) -> None:
             if driver.current_url.rstrip("/") != args.url.rstrip("/"):
                 driver.get(args.url)
                 time.sleep(2)
+            if not _wait_for_publish_page(driver, args.url, args.login_timeout):
+                raise ValueError("M-Team 登录超时；请重新运行命令并在 ChromeDriver 窗口中完成登录。")
             if not args.yes:
                 technical_type = str(package.get("technical_info_type") or "MediaInfo")
                 action = f"标题、副标题、豆瓣链接和 {technical_type}"
