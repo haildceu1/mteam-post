@@ -10,6 +10,8 @@ from unittest.mock import patch
 from media_title_renamer.cli import MediaInfo
 
 from media_title_renamer.prepare import (
+    _bdinfo_list_command,
+    _bdinfo_scan_command,
     DoubanMatch,
     TmdbMatch,
     _extract_screenshots,
@@ -211,6 +213,18 @@ class PrepareTests(unittest.TestCase):
 3   2      00009.MPLS     00:01:00
 """
         self.assertEqual(select_longest_bdinfo_playlist(listing), "00005")
+
+    def test_bdinfo_rs_iso_commands_include_report_destination(self):
+        disc = Path(r"D:\Movie\Disc.iso")
+        output = Path(r"D:\Movie\Disc.prepare")
+        self.assertEqual(
+            _bdinfo_list_command("bdinfo-rs", "rs", disc, output),
+            ["bdinfo-rs", "--list", str(disc), str(output)],
+        )
+        self.assertEqual(
+            _bdinfo_scan_command("bdinfo-rs", "rs", disc, output, "00005"),
+            ["bdinfo-rs", "--mpls", "00005", str(disc), str(output)],
+        )
 
     def test_bluray_iso_uses_existing_bdinfo_report(self):
         report = """DISC INFO:

@@ -555,6 +555,26 @@ def _bdinfo_cli_kind(executable: str) -> str:
     return "classic"
 
 
+def _bdinfo_list_command(cli: str, kind: str, disc: Path, output_dir: Path) -> list[str]:
+    if kind == "rs":
+        # bdinfo-rs 4.x requires REPORT_DEST even for --list when BD_PATH is
+        # an ISO image. Supplying it for folders too keeps one stable command.
+        return [cli, "--list", str(disc), str(output_dir)]
+    return [cli, "--list", str(disc)]
+
+
+def _bdinfo_scan_command(
+    cli: str,
+    kind: str,
+    disc: Path,
+    output_dir: Path,
+    selected: str,
+) -> list[str]:
+    if kind == "rs":
+        return [cli, "--mpls", selected, str(disc), str(output_dir)]
+    return [cli, "--mpls", f"{selected}.MPLS", str(disc), str(output_dir)]
+
+
 def generate_bdinfo_report(
     disc: Path,
     output_dir: Path,
@@ -566,8 +586,9 @@ def generate_bdinfo_report(
     cli = _find_bdinfo_cli(executable)
     kind = _bdinfo_cli_kind(cli)
     selected = _normalise_bdinfo_playlist(playlist) if playlist else ""
+    output_dir.mkdir(parents=True, exist_ok=True)
     if not selected:
-        list_command = [cli, str(disc), "--list"] if kind == "rs" else [cli, "--list", str(disc)]
+        list_command = _bdinfo_list_command(cli, kind, disc, output_dir)
         listing = subprocess.run(
             list_command,
             capture_output=True,
@@ -579,11 +600,7 @@ def generate_bdinfo_report(
             detail = listing.stderr.strip() or listing.stdout.strip() or f"退出码 {listing.returncode}"
             raise RuntimeError(f"BDInfo 播放列表扫描失败：{detail}")
         selected = select_longest_bdinfo_playlist(listing.stdout)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    if kind == "rs":
-        command = [cli, str(disc), str(output_dir), "--mpls", selected]
-    else:
-        command = [cli, "--mpls", f"{selected}.MPLS", str(disc), str(output_dir)]
+    command = _bdinfo_scan_command(cli, kind, disc, output_dir, selected)
     print(f"正在生成 BDInfo：主播放列表 {selected}.MPLS；完整扫描可能需要较长时间……")
     result = subprocess.run(command)
     if result.returncode not in {0, 3}:
