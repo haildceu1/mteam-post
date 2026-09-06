@@ -275,6 +275,8 @@ Windows 下会临时挂载 ISO，从 `BDMV/STREAM` 或 `VIDEO_TS` 中选择最�
 media-title-rename prepare "E:\Movie\Disc.iso" --screenshot-source "M:\BDMV\STREAM\00001.m2ts"
 ```
 
+JPG 截图会自动识别 HDR10、HDR10+、HLG 和 Dolby Vision，并转换为适合网页显示的 BT.709 SDR。对 Blu-ray M2TS/HEVC 会先解码 3 秒预滚区再截取目标帧，避免随机定位到缺少参考帧的位置而出现整张发白、彩色块或马赛克。普通 SDR 视频不会进行 HDR 色调映射。
+
 ### 蓝光 ISO 的 BDInfo
 
 Blu-ray/UHD ISO 不再把 ISO 容器的简略 MediaInfo 填入发布页，而是调用 `bdinfo-rs`：先列出播放列表，默认选择时长最长的一项，再完整扫描并保存经典 BDInfo Text。

@@ -10,6 +10,8 @@ from pathlib import Path
 
 
 DEFAULT_MAX_SIZE_KB = 500
+SEEK_PREROLL_SECONDS = 3.0
+HDR_TRANSFERS = {"smpte2084", "arib-std-b67"}
 
 
 def _run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -56,7 +58,11 @@ def _probe_video(ffprobe: str, video_path: Path) -> dict:
         "-select_streams",
         "v:0",
         "-show_entries",
-        "stream=duration,width,height,color_range,color_space,color_transfer,color_primaries:format=duration",
+        (
+            "stream=duration,width,height,pix_fmt,profile,color_range,color_space,"
+            "color_transfer,color_primaries:stream_side_data=side_data_type,dv_profile:"
+            "format=duration"
+        ),
         "-of",
         "json",
         str(video_path),
@@ -85,7 +91,23 @@ def _probe_video(ffprobe: str, video_path: Path) -> dict:
         "color_space": stream.get("color_space"),
         "color_transfer": stream.get("color_transfer"),
         "color_primaries": stream.get("color_primaries"),
+        "pix_fmt": stream.get("pix_fmt"),
+        "profile": stream.get("profile"),
+        "side_data_types": tuple(
+            str(item.get("side_data_type") or "")
+            for item in stream.get("side_data_list") or ()
+        ),
     }
+
+
+def _is_hdr(info: dict) -> bool:
+    transfer = str(info.get("color_transfer") or "").lower()
+    if transfer in HDR_TRANSFERS:
+        return True
+    return any(
+        "dovi" in value.lower() or "dolby vision" in value.lower()
+        for value in info.get("side_data_types") or ()
+    )
 
 
 def _color_options(info: dict) -> list[str]:
@@ -116,33 +138,44 @@ def _temp_path(output_dir: Path, extension: str) -> Path:
 
 
 def _base_command(ffmpeg: str, video_path: Path, timestamp: float) -> list[str]:
-    return [
+    # M2TS/HEVC 在目标点直接 fast seek 时，第一帧可能缺少参考帧。画面通常表现为
+    # 整体发白、彩色块或马赛克，看起来很像 HDR 过曝。先从目标点前几秒开始，
+    # 再在解码后精确跳过预滚区，既能恢复参考帧，也不必从片头完整解码。
+    preroll = min(max(timestamp, 0.0), SEEK_PREROLL_SECONDS)
+    command = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
         "error",
         "-ss",
-        f"{timestamp:.3f}",
+        f"{max(timestamp - preroll, 0.0):.3f}",
         "-i",
         str(video_path),
+    ]
+    if preroll:
+        command += ["-ss", f"{preroll:.3f}"]
+    command += [
         "-map",
         "0:v:0",
         "-frames:v",
         "1",
         "-an",
     ]
+    return command
 
 
 def _filter_option(width: int | None, output_format: str, info: dict) -> list[str]:
     filters: list[str] = []
 
-    is_hdr = info.get("color_transfer") in {"smpte2084", "arib-std-b67"}
-    if output_format == "jpg" and is_hdr:
-        # HDR(PQ/BT.2020) 先转线性，再用 Mobius 映射到 SDR(BT.709)，避免图片发灰。
+    if output_format == "jpg" and _is_hdr(info):
+        # tonemap 要求线性、单精度浮点输入。显式转换可以避免 FFmpeg 自动插入
+        # 不正确的整数像素格式转换，并兼容 HDR10/HDR10+/HLG/Dolby Vision 基础层。
         filters += [
             "zscale=transfer=linear:npl=100",
-            "tonemap=mobius:desat=0",
-            "zscale=primaries=bt709:transfer=bt709:matrix=bt709",
+            "format=gbrpf32le",
+            "zscale=primaries=bt709",
+            "tonemap=tonemap=mobius:param=0.3:desat=2",
+            "zscale=transfer=bt709:matrix=bt709:range=tv",
         ]
 
     if width:
@@ -174,6 +207,7 @@ def _encode_until_small(
     widths = _candidate_widths(info.get("width", 0), max_width)
     best_temp: Path | None = None
     best_size: int | None = None
+    last_error: str | None = None
 
     if output_format == "avif":
         encoders = _run([ffmpeg, "-hide_banner", "-encoders"], check=False).stdout
@@ -213,6 +247,17 @@ def _encode_until_small(
                     command += ["-f", "avif"]
                 elif output_format == "jpg":
                     command += ["-c:v", "mjpeg", "-q:v", str(quality), "-pix_fmt", "yuvj420p"]
+                    if _is_hdr(info):
+                        command += [
+                            "-color_range",
+                            "pc",
+                            "-colorspace",
+                            "bt709",
+                            "-color_trc",
+                            "bt709",
+                            "-color_primaries",
+                            "bt709",
+                        ]
                     command += ["-f", "image2"]
                 else:
                     command += ["-c:v", "png", "-pix_fmt", "rgb48be", "-f", "image2"]
@@ -220,9 +265,11 @@ def _encode_until_small(
                 command += ["-map_metadata", "0", "-y", str(temp)]
                 result = _run(command, check=False)
                 if result.returncode != 0 or not temp.is_file():
-                    detail = result.stderr.strip() or "未知错误"
+                    last_error = result.stderr.strip() or "未知错误"
                     temp.unlink(missing_ok=True)
-                    raise RuntimeError(f"截图编码失败：{detail}")
+                    # 某些 FFmpeg/MJPEG 版本无法给复杂的 4K 帧分配最高质量档所需的
+                    # 单帧缓冲区。继续尝试较低质量或较小尺寸，而不是让整个 prepare 中止。
+                    continue
 
                 size = temp.stat().st_size
                 if best_size is None or size < best_size:
@@ -237,7 +284,7 @@ def _encode_until_small(
                     return size
 
         if best_temp is None or best_size is None:
-            raise RuntimeError("没有生成有效截图")
+            raise RuntimeError(f"截图编码失败：{last_error or '没有生成有效截图'}")
         best_temp.replace(output_path)
         print(f"警告：已尽量压缩，但仍为 {best_size / 1024:.1f} KB")
         return best_size
