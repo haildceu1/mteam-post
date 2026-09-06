@@ -201,6 +201,25 @@ media-title-rename publish "F:\TV\20.22" `
 
 电影、DVD ISO、蓝光 ISO 也使用相同命令。`prepare` 的参数可以直接继续使用，例如 `--tmdb-id`、`--douban-url`、`--category`、`--screenshots 4`。若只想填写文字字段而不上传文件，添加 `--no-upload`。
 
+如果之前已经完成 `prepare`，可直接把资料包 JSON 或整个 `.prepare` 目录交给 `publish`。此模式不需要 `--apply`，并会跳过 MediaInfo/BDInfo、TMDB/豆瓣查询、截图生成、种子哈希和改名：
+
+```powershell
+media-title-rename publish "F:\TV\The Office S01-S09.prepare\mteam-prepare.json" `
+  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile"
+
+# 也可以直接传 .prepare 目录
+media-title-rename publish "F:\TV\The Office S01-S09.prepare" `
+  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile"
+```
+
+如果希望继续使用原媒体路径，可添加 `--reuse-prepare`；程序会在媒体旁查找 `mteam-prepare.json` 中 `input_path` 或 `prepared_path` 匹配的最新资料包：
+
+```powershell
+media-title-rename publish "F:\TV\The Office" `
+  --reuse-prepare `
+  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile"
+```
+
 `--cookie-file` 同时接受两种格式：Cookie-Editor 导出的 Netscape Cookie，或从 M-Team 开发者工具复制的请求头。后者会恢复页面使用的 `localStorage` 登录值，不会错误地当成普通 Cookie。请求头、Cookie 和资料包都属于敏感内容，请勿上传到 Git 或发送给他人。
 
 如果使用 CookieCloud，可让 ChromeDriver 使用一个单独的、已安装 CookieCloud 且已经登录的配置目录：
