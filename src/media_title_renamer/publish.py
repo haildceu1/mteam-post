@@ -4,10 +4,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from .mteam_fill import main as mteam_fill_main
 from .prepare import main as prepare_main
+
+
+def _default_profile_dir() -> Path:
+    configured = os.environ.get("MTEAM_PROFILE_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    preferred = Path(r"D:\Cinema\mteam")
+    if preferred.is_dir():
+        return preferred
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "mteam-post" / "chrome-profile"
+    return Path.home() / "AppData" / "Local" / "mteam-post" / "chrome-profile"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -22,12 +36,23 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         help="视频/ISO、剧集目录、mteam-prepare.json，或包含该 JSON 的 .prepare 目录",
     )
-    parser.add_argument(
+    reuse = parser.add_mutually_exclusive_group()
+    reuse.add_argument(
         "--reuse-prepare",
         action="store_true",
-        help="按原媒体路径查找旁边已有的 .prepare 资料包，跳过重新探测、截图和种子哈希",
+        help="要求复用匹配的 .prepare 资料包；现在默认会自动复用，保留此参数用于严格检查",
     )
-    parser.add_argument("--profile-dir", type=Path, help="已登录的专用 Chrome 配置目录")
+    reuse.add_argument(
+        "--refresh-prepare",
+        action="store_true",
+        help="忽略已有资料包，强制重新探测、截图并生成种子（必须同时使用 --apply）",
+    )
+    parser.add_argument(
+        "--profile-dir",
+        type=Path,
+        default=_default_profile_dir(),
+        help="专用 Chrome 配置目录；默认读取 MTEAM_PROFILE_DIR，本机优先使用 D:\\Cinema\\mteam",
+    )
     parser.add_argument("--cookie-file", type=Path, help="M-Team Cookie 导出或请求头复制文件")
     parser.add_argument("--url", default="https://kp.m-team.cc/upload", help="M-Team 发布页地址")
     uploads = parser.add_mutually_exclusive_group()
@@ -90,18 +115,28 @@ def main(argv: list[str] | None = None) -> None:
     args, prepare_options = parser.parse_known_args(argv)
 
     package_path = _direct_package(args.input)
-    reuse_requested = package_path is not None or args.reuse_prepare
-    if reuse_requested:
+    direct_package = package_path is not None
+    non_apply_options = [option for option in prepare_options if option != "--apply"]
+    if direct_package and args.refresh_prepare:
+        parser.error("输入已经是资料包，不能同时使用 --refresh-prepare")
+    if args.reuse_prepare and non_apply_options:
+        parser.error(
+            "要求复用现有资料包时不能再传 prepare 参数：" + " ".join(non_apply_options)
+        )
+
+    if package_path is None and not args.refresh_prepare and not non_apply_options:
+        try:
+            package_path = _find_existing_package(args.input)
+        except FileNotFoundError as exc:
+            if args.reuse_prepare:
+                parser.error(str(exc))
+
+    if package_path is not None:
         unsupported = [option for option in prepare_options if option != "--apply"]
         if unsupported:
             parser.error(
                 "复用现有资料包时不能再传 prepare 参数：" + " ".join(unsupported)
             )
-        if package_path is None:
-            try:
-                package_path = _find_existing_package(args.input)
-            except FileNotFoundError as exc:
-                parser.error(str(exc))
         print(f"正在复用现有发布资料包：{package_path}")
         print("已跳过媒体探测、截图生成、种子哈希和文件改名。")
     else:
@@ -115,8 +150,7 @@ def main(argv: list[str] | None = None) -> None:
             raise RuntimeError("prepare 未返回 M-Team 发布资料包")
 
     fill_args = [str(package_path)]
-    if args.profile_dir:
-        fill_args.extend(["--profile-dir", str(args.profile_dir)])
+    fill_args.extend(["--profile-dir", str(args.profile_dir)])
     if args.cookie_file:
         fill_args.extend(["--cookie-file", str(args.cookie_file)])
     fill_args.extend(["--url", args.url])

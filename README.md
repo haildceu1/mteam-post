@@ -93,11 +93,10 @@ media-title-rename mteam-fill --login-only `
 ```powershell
 media-title-rename publish "F:\TV\20.22" `
   --apply `
-  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile" `
   --keep-open
 ```
 
-单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并将截图追加在简介末尾。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。
+单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并将截图追加在简介末尾。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。`publish` 的 Chrome 配置目录按以下顺序自动选择：环境变量 `MTEAM_PROFILE_DIR`、本机已有的 `D:\Cinema\mteam`、最后是 `%LOCALAPPDATA%\mteam-post\chrome-profile`；通常无需再写 `--profile-dir`，仍可用该参数临时覆盖。
 
 升级项目时执行：
 
@@ -196,12 +195,17 @@ media-title-rename mteam-fill "F:\TV\20.22.prepare\mteam-prepare.json" `
 
 ### 一条命令完成准备和填表
 
-首次登录完成后，可以使用 `publish` 合并 `prepare --apply` 与网页填写；`--apply` 是必填项，以保证 V1 种子中的文件名和磁盘文件一致。默认会上传种子及前 4 张截图，仍会在真正写入/上传前询问确认，且绝不会点击最终发布按钮：
+首次登录完成后，可以使用 `publish` 合并资料准备与网页填写。程序会先按 `input_path`/`prepared_path` 自动寻找旁边已经完成的 `.prepare` 资料包：找到就直接复用，不会再次执行 MediaInfo/BDInfo、TMDB/豆瓣查询、截图和种子哈希；找不到时才开始新的 `prepare`，这时必须提供 `--apply`。默认会上传种子及前 4 张截图，仍会在真正写入/上传前询问确认，且绝不会点击最终发布按钮：
 
 ```powershell
-media-title-rename publish "F:\TV\20.22" `
-  --apply `
-  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile"
+# 已有匹配资料包：最简命令，自动复用默认 Chrome 配置
+media-title-rename publish "F:\TV\20.22"
+
+# 没有资料包：执行一次新的准备流程
+media-title-rename publish "F:\TV\20.22" --apply
+
+# 即使存在资料包，也强制重新准备
+media-title-rename publish "F:\TV\20.22" --refresh-prepare --apply
 ```
 
 电影、DVD ISO、蓝光 ISO 也使用相同命令。`prepare` 的参数可以直接继续使用，例如 `--tmdb-id`、`--douban-url`、`--category`、`--screenshots 4`。若只想填写文字字段而不上传文件，添加 `--no-upload`。
@@ -210,19 +214,24 @@ media-title-rename publish "F:\TV\20.22" `
 
 ```powershell
 media-title-rename publish "F:\TV\The Office S01-S09.prepare\mteam-prepare.json" `
-  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile"
+  --keep-open
 
 # 也可以直接传 .prepare 目录
-media-title-rename publish "F:\TV\The Office S01-S09.prepare" `
-  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile"
+media-title-rename publish "F:\TV\The Office S01-S09.prepare"
 ```
 
-如果希望继续使用原媒体路径，可添加 `--reuse-prepare`；程序会在媒体旁查找 `mteam-prepare.json` 中 `input_path` 或 `prepared_path` 匹配的最新资料包：
+使用原媒体路径时也会默认自动复用，不再需要 `--reuse-prepare`：
 
 ```powershell
-media-title-rename publish "F:\TV\The Office" `
-  --reuse-prepare `
-  --profile-dir "$env:LOCALAPPDATA\mteam-post\chrome-profile"
+media-title-rename publish "F:\TV\The Office"
+```
+
+兼容参数 `--reuse-prepare` 仍然保留：使用它表示“必须找到现有资料包”，找不到时直接报错而不是重新准备。若媒体内容发生变化，请使用 `--refresh-prepare --apply` 强制重建。
+
+若希望在其他电脑使用自定义默认配置目录，可以在新终端中设置：
+
+```powershell
+[Environment]::SetEnvironmentVariable("MTEAM_PROFILE_DIR", "E:\Cinema\mteam", "User")
 ```
 
 `--cookie-file` 同时接受两种格式：Cookie-Editor 导出的 Netscape Cookie，或从 M-Team 开发者工具复制的请求头。后者会恢复页面使用的 `localStorage` 登录值，不会错误地当成普通 Cookie。请求头、Cookie 和资料包都属于敏感内容，请勿上传到 Git 或发送给他人。
