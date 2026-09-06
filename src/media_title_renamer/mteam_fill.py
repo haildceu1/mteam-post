@@ -390,6 +390,47 @@ def _file_inputs(driver):
     return [element for element in driver.find_elements("css selector", "input[type=file]") if element.is_enabled() or element.get_attribute("style") is not None]
 
 
+def _wait_for_image_uploads(driver, expected_count: int, timeout: float = 120.0) -> bool:
+    """Wait until Ant Design has uploaded every selected local image."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        state = driver.execute_script(
+            """
+            const dialog = [...document.querySelectorAll('[role="dialog"]')]
+              .find(el => el.offsetParent !== null);
+            if (!dialog) return {count: 0, uploading: 0, failed: 0};
+            const items = [...dialog.querySelectorAll('.ant-upload-list-item')];
+            return {
+              count: items.length,
+              uploading: items.filter(el => el.classList.contains('ant-upload-list-item-uploading')).length,
+              failed: items.filter(el => el.classList.contains('ant-upload-list-item-error')).length,
+            };
+            """
+        ) or {}
+        if int(state.get("failed", 0)):
+            return False
+        if int(state.get("count", 0)) >= expected_count and not int(state.get("uploading", 0)):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _wait_for_editor_images(driver, expected_count: int, timeout: float = 30.0) -> bool:
+    """Wait until uploaded images have been inserted into the Lexical editor."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        count = driver.execute_script(
+            """
+            const editor = document.querySelector('[contenteditable="true"][data-lexical-editor]');
+            return editor ? editor.querySelectorAll('img').length : 0;
+            """
+        )
+        if int(count or 0) >= expected_count:
+            return True
+        time.sleep(0.5)
+    return False
+
+
 def _load_selenium():
     try:
         from selenium import webdriver
@@ -452,24 +493,39 @@ def _fill_page(driver, package: dict[str, object], *, upload: bool) -> None:
             return
         valid = [str(Path(item).resolve()) for item in screenshots if Path(item).is_file()]
         if valid:
+            existing_images = int(
+                driver.execute_script(
+                    """
+                    const editor = document.querySelector('[contenteditable="true"][data-lexical-editor]');
+                    return editor ? editor.querySelectorAll('img').length : 0;
+                    """
+                )
+                or 0
+            )
             image_inputs[-1].send_keys("\n".join(valid))
-            time.sleep(0.5)
-            driver.execute_script(
+            if not _wait_for_image_uploads(driver, len(valid)):
+                print("警告：本地截图未能全部上传，请检查图片上传窗口。")
+                return
+            confirmed = driver.execute_script(
                 """
                 const dialog = [...document.querySelectorAll('[role="dialog"], .ant-modal-wrap')]
                   .find(el => el.offsetParent !== null);
                 const button = dialog && [...dialog.querySelectorAll('button')]
                   .find(el => /確\\s*認|确认/i.test((el.innerText || '').trim()));
-                if (button) button.click();
+                if (!button) return false;
+                button.click();
+                return true;
                 """
             )
+            if not confirmed or not _wait_for_editor_images(driver, existing_images + len(valid)):
+                print("警告：截图已上传，但未能确认全部插入简介，请检查简介编辑器。")
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="使用 ChromeDriver 将 M-Team 发布资料包填入已登录的发布页")
     parser.add_argument("package", type=Path, nargs="?", help="prepare 生成的 mteam-prepare.json；--login-only 时可省略")
     parser.add_argument("--cookie-file", "--session-file", dest="session_file", type=Path, help="M-Team Cookie 导出或请求头复制文件")
-    parser.add_argument("--url", default="https://kp.m-team.cc/", help="M-Team 发布页地址；默认使用 kp.m-team.cc 根页")
+    parser.add_argument("--url", default="https://kp.m-team.cc/upload", help="M-Team 发布页地址；默认使用 kp.m-team.cc/upload")
     parser.add_argument("--profile-dir", type=Path, help="专用 Chrome 配置目录；可用于复用 CookieCloud 登录态")
     parser.add_argument("--upload", action="store_true", help="在填表后上传种子和截图；仍不会点击最终发布")
     parser.add_argument("--yes", action="store_true", help="跳过上传前确认；仅建议在你已检查资料包后使用")

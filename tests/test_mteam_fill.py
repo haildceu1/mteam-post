@@ -5,12 +5,16 @@ from pathlib import Path
 from media_title_renamer.mteam_fill import (
     _has_mteam_auth,
     _is_login_url,
+    _parser,
     _wait_for_mteam_auth,
     load_mteam_session,
 )
 
 
 class MTeamFillTests(unittest.TestCase):
+    def test_default_url_is_upload_page(self):
+        self.assertEqual(_parser().parse_args([]).url, "https://kp.m-team.cc/upload")
+
     def test_login_url_detection_ignores_query_and_trailing_slash(self):
         self.assertTrue(_is_login_url("https://kp.m-team.cc/login/?redirect=%2Fupload"))
         self.assertFalse(_is_login_url("https://kp.m-team.cc/upload"))
