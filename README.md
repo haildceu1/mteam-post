@@ -6,34 +6,43 @@
 
 ### 1. 安装系统依赖
 
-准备以下软件，并确保命令行可以找到它们：
-
-- Python 3.10 或更高版本
-- Google Chrome
-- MediaInfo CLI（命令为 `mediainfo`）
-- FFmpeg（同时需要 `ffmpeg` 和 `ffprobe`）
-- [bdinfo-rs](https://github.com/agentjp/bdinfo-rs)（仅自动处理 Blu-ray/UHD ISO 时需要）
-- Git
-
-Selenium 会自动寻找或下载与 Chrome 匹配的 ChromeDriver，一般不需要手工下载驱动。
-蓝光 ISO 必须使用 BDInfo 格式；Windows 可安装命令行版：
+本节不包含 Python 的安装；请先自行准备 Python 3.10 或更高版本。其余依赖可以在 Windows PowerShell 中使用 WinGet 安装：
 
 ```powershell
-winget install agentjp.bdinfo-rs
+# 更新 WinGet 软件源，避免旧缓存导致“找不到程序包”
+winget source update
+
+# 必需：Git、Google Chrome、MediaInfo CLI、FFmpeg/FFprobe
+winget install --id Git.Git --exact --source winget --accept-package-agreements --accept-source-agreements
+winget install --id Google.Chrome --exact --source winget --accept-package-agreements --accept-source-agreements
+winget install --id MediaArea.MediaInfo --exact --source winget --accept-package-agreements --accept-source-agreements
+winget install --id Gyan.FFmpeg --exact --source winget --accept-package-agreements --accept-source-agreements
+
+# 仅处理 Blu-ray/UHD ISO 时需要；普通视频和 DVD ISO 可以不安装
+winget install --id agentjp.bdinfo-rs --exact --source winget --accept-package-agreements --accept-source-agreements
 ```
 
-`winget` 安装完成后会更新用户 PATH，但已经打开的 PowerShell 不会自动刷新。请关闭并重新打开终端，再运行 `bdinfo-rs --version`；当前项目已适配 `bdinfo-rs 4.0.0`。
+各软件的用途：
 
-在 PowerShell 中检查：
+- `mediainfo`：读取普通视频、剧集和 DVD ISO 的媒体轨道信息。
+- `ffmpeg`、`ffprobe`：探测视频并生成4张截图，包括 HDR 到 SDR 色调映射。
+- Google Chrome：打开并自动填写 M-Team 发布页。
+- Git：下载和更新本项目。
+- `bdinfo-rs`：为 Blu-ray/UHD ISO 生成 M-Team 所需的 BDInfo Text；当前项目已适配 4.0.0。
+
+Selenium 会通过 Selenium Manager 自动寻找或下载与 Chrome 匹配的 ChromeDriver，通常不需要单独安装 ChromeDriver。Windows 挂载 ISO 使用系统自带的 PowerShell 功能，不需要额外安装虚拟光驱。
+
+WinGet 安装完成后会更新 PATH，但已经打开的 PowerShell 通常不会自动刷新。请关闭所有 PowerShell 窗口，重新打开后再验证：
 
 ```powershell
-py --version
+git --version
 mediainfo --version
 ffmpeg -version
 ffprobe -version
 bdinfo-rs --version
-git --version
 ```
+
+如果不处理 Blu-ray/UHD ISO，最后一条 `bdinfo-rs --version` 检查可以跳过。若某条命令仍提示“无法识别”，先重新登录 Windows；仍无效时使用 `winget list --id <上面的包 ID> --exact` 确认软件是否已经安装。
 
 ### 2. 下载并安装本项目
 
