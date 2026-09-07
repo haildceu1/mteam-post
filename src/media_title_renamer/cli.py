@@ -398,6 +398,10 @@ def _infer_source(
         if "X264" in library or "X265" in library:
             return "UHD BluRay BDRip" if is_uhd else "BluRay BDRip"
         return "UHD BluRay" if is_uhd else "BluRay"
+    # A video ISO larger than the largest supported DVD9 capacity is a
+    # Blu-ray/UHD disc even when a scene-style filename only says “Disc 1”.
+    if extension.lower() == ".iso" and file_size and file_size > 9_000_000_000:
+        return "UHD BluRay" if is_uhd else "BluRay"
     return None
 
 

@@ -9,12 +9,13 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Iterator
@@ -790,8 +791,200 @@ class FolderPlan:
     media: MediaInfo
 
 
+_CHINESE_DIGITS = {
+    "零": 0,
+    "〇": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "兩": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+
+
+def _number_token(value: str) -> int | None:
+    value = value.strip()
+    if value.isdigit():
+        return int(value)
+    if value == "十":
+        return 10
+    if "十" in value:
+        tens, ones = value.split("十", 1)
+        tens_value = _CHINESE_DIGITS.get(tens, 1) if tens else 1
+        ones_value = _CHINESE_DIGITS.get(ones, 0) if ones else 0
+        return tens_value * 10 + ones_value
+    if value and all(character in _CHINESE_DIGITS for character in value):
+        result = 0
+        for character in value:
+            result = result * 10 + _CHINESE_DIGITS[character]
+        return result
+    return None
+
+
+def _season_number(value: str) -> int | None:
+    chinese = re.search(r"第\s*([0-9零〇一二两兩三四五六七八九十]+)\s*季", value, re.I)
+    if chinese:
+        return _number_token(chinese.group(1))
+    western = re.search(r"(?:^|[^A-Z0-9])(?:SEASON\s*|S)0*(\d{1,2})(?!\d)", value, re.I)
+    return int(western.group(1)) if western else None
+
+
+def _disc_number(value: str) -> int | None:
+    normalized = re.search(r"\bS\d{1,2}D0*(\d{1,2})(?!\d)", value, re.I)
+    if normalized:
+        return int(normalized.group(1))
+    chinese = re.search(
+        r"第\s*([0-9零〇一二两兩三四五六七八九十]+)\s*(?:碟|盘|盤|张|張)",
+        value,
+        re.I,
+    )
+    if chinese:
+        return _number_token(chinese.group(1))
+    western = re.search(
+        r"(?:^|[^A-Z0-9])(?:DISC|DISK|VOL(?:UME)?|D)[ ._-]*0*(\d{1,2})(?!\d)",
+        value,
+        re.I,
+    )
+    return int(western.group(1)) if western else None
+
+
+def _disc_episode(path: Path, root: Path) -> str | None:
+    if path.suffix.casefold() != ".iso":
+        return None
+    disc = _disc_number(path.stem)
+    if disc is None:
+        return None
+    try:
+        relative = path.relative_to(root)
+        context = " ".join((root.name, *relative.parts[:-1], path.stem))
+    except ValueError:
+        context = f"{root.name} {path.stem}"
+    season = _season_number(context)
+    if season is None:
+        return None
+    return f"S{season:02d}D{disc:02d}"
+
+
+def _bracket_release_group(path: Path) -> str | None:
+    """Return a likely release group such as ``TTG`` from ``[TTG]``."""
+    for value in reversed(re.findall(r"\[([^\[\]]+)\]", path.stem)):
+        candidate = value.strip()
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9._@-]{1,30}", candidate):
+            if not re.fullmatch(r"(?:DISC|DISK|SEASON|S|D)\d*", candidate, re.I):
+                return candidate
+    return None
+
+
+def _embedded_tmdb_id(path: Path) -> int | None:
+    for part in reversed(path.parts):
+        match = re.search(r"(?:\[|\{|\()?\s*tmdb\s*=\s*(\d+)", part, re.I)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _media_from_bdinfo(text: str, source: str) -> MediaInfo:
+    """Extract title fields from a classic BDInfo report for a disc set."""
+    video_match = re.search(r"\b(4320|2160|1080|720|576|480)([pi])\b", text, re.I)
+    if not video_match:
+        raise ValueError("BDInfo 报告中没有找到视频分辨率")
+    height = int(video_match.group(1))
+    scan = video_match.group(2).lower()
+    widths = {4320: 7680, 2160: 3840, 1080: 1920, 720: 1280, 576: 720, 480: 720}
+
+    video_section_match = re.search(r"\bVIDEO:\s*(.*?)(?:\n\s*AUDIO:|\Z)", text, re.I | re.S)
+    video_section = video_section_match.group(1) if video_section_match else text
+    upper_video = video_section.upper()
+    if "HEVC" in upper_video or "H.265" in upper_video:
+        video_format = "HEVC"
+    elif "AVC" in upper_video or "H.264" in upper_video:
+        video_format = "AVC"
+    elif "VC-1" in upper_video or "VC1" in upper_video:
+        video_format = "VC-1"
+    elif "MPEG-2" in upper_video or "MPEG2" in upper_video:
+        video_format = "MPEG-2"
+    else:
+        raise ValueError("BDInfo 报告中没有找到受支持的视频编码")
+
+    hdr: list[str] = []
+    if "HDR10+" in upper_video:
+        hdr.append("HDR10+")
+    elif "HDR10" in upper_video or "PQ" in upper_video:
+        hdr.append("HDR10")
+    if "DOLBY VISION" in upper_video or "DOVI" in upper_video:
+        hdr.append("DoVi")
+
+    fps_match = re.search(r"(\d+(?:\.\d+)?)\s*fps", video_section, re.I)
+    frame_rate = float(fps_match.group(1)) if fps_match else 0.0
+
+    audio_section_match = re.search(
+        r"\bAUDIO:\s*(.*?)(?:\n\s*(?:SUBTITLES|FILES|CHAPTERS|STREAM DIAGNOSTICS):|\Z)",
+        text,
+        re.I | re.S,
+    )
+    audio_section = audio_section_match.group(1) if audio_section_match else ""
+    audio_rows: list[tuple[int, str, str | None, str]] = []
+    codec_patterns = (
+        (r"DTS-HD\s+Master|DTS-HD\s+MA", "DTS-HD MA"),
+        (r"DTS-HD\s+High\s+Resolution|DTS-HD\s+HRA", "DTS-HD HRA"),
+        (r"DTS:X|DTS-X", "DTS-X"),
+        (r"Dolby\s+TrueHD(?:/Atmos)?", "TrueHD Atmos"),
+        (r"Dolby\s+Digital\s+Plus(?:/Atmos)?", "DDP Atmos"),
+        (r"Dolby\s+Digital", "DD"),
+        (r"(?:Linear\s+PCM|LPCM)", "LPCM"),
+        (r"\bDTS\b", "DTS"),
+    )
+    for line in audio_section.splitlines():
+        codec = next((label for pattern, label in codec_patterns if re.search(pattern, line, re.I)), None)
+        if not codec:
+            continue
+        if "ATMOS" not in line.upper():
+            codec = codec.replace(" Atmos", "")
+        bitrate_match = re.search(r"([\d, ]+)\s*kbps", line, re.I)
+        bitrate = int(re.sub(r"\D", "", bitrate_match.group(1))) * 1000 if bitrate_match else 0
+        channels_match = re.search(r"\b(\d{1,2}\.\d)\b", line)
+        language_match = re.search(
+            r"\b(English|Chinese|Mandarin|Cantonese|French|German|Italian|Japanese|Korean|Spanish|Russian)\b",
+            line,
+            re.I,
+        )
+        audio_rows.append(
+            (
+                bitrate,
+                codec,
+                channels_match.group(1) if channels_match else None,
+                language_match.group(1).lower() if language_match else "",
+            )
+        )
+    primary = max(audio_rows, key=lambda item: item[0]) if audio_rows else (0, "", None, "")
+
+    return MediaInfo(
+        width=widths[height],
+        height=height,
+        resolution=f"{height}{scan}",
+        video_format=video_format,
+        writing_library="",
+        video_codec=_video_codec(video_format, "", source),
+        hdr=tuple(hdr),
+        hfr=f"{round(frame_rate):.0f}Fps" if frame_rate >= 50 else None,
+        audio_codec=primary[1],
+        audio_channels=primary[2],
+        audio_tracks=len(audio_rows),
+        audio_bitrate=primary[0],
+        scan_type="Interlaced" if scan == "i" else "Progressive",
+        scan_order="",
+        audio_language=primary[3],
+    )
+
+
 def _episode_sort_key(value: str) -> tuple[int, int, str]:
-    match = re.match(r"S(\d{1,2})(?:E(\d{1,3}))?", value, re.I)
+    match = re.match(r"S(\d{1,2})(?:[ED](\d{1,3}))?", value, re.I)
     if not match:
         return (999, 9999, value.casefold())
     return (int(match.group(1)), int(match.group(2) or 0), value.casefold())
@@ -878,11 +1071,16 @@ def _folder_screenshots(
     output: Path,
     count: int,
     override: Path | None,
+    *,
+    first_only: bool = False,
 ) -> list[Path]:
     if count <= 0:
         return []
     if override:
         with screenshot_source(plans[0].source_path, override) as source_for_screenshots:
+            return _extract_screenshots(source_for_screenshots, output, count=count)
+    if first_only:
+        with screenshot_source(plans[0].source_path) as source_for_screenshots:
             return _extract_screenshots(source_for_screenshots, output, count=count)
 
     selected_count = min(count, len(plans))
@@ -934,6 +1132,11 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         raise ValueError("文件夹模式用于剧集，--kind 不能设为 movie")
     if args.episode:
         raise ValueError("文件夹模式会从每个文件名识别季集，请不要传 --episode")
+    embedded_tmdb_id = _embedded_tmdb_id(root)
+    if args.tmdb_id is None and embedded_tmdb_id is not None:
+        args = argparse.Namespace(**vars(args))
+        args.tmdb_id = embedded_tmdb_id
+        print(f"已从目录名识别 TMDB ID：{embedded_tmdb_id}")
     paths = _folder_videos(root)
     if not paths:
         raise ValueError("目录中没有找到支持的视频文件")
@@ -943,22 +1146,68 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     print(f"正在扫描剧集文件名：共 {len(paths)} 个")
     for path in paths:
         hints = filename_hints(path)
+        disc_episode = _disc_episode(path, root)
+        if disc_episode and not hints.episode:
+            hints = replace(
+                hints,
+                episode=disc_episode,
+                group=hints.group or _bracket_release_group(path),
+            )
         probes.append((path, hints))
         if not hints.episode:
             missing_episodes.append(path)
     if missing_episodes:
         examples = "；".join(str(path.relative_to(root)) for path in missing_episodes[:8])
         extra = f"（另有 {len(missing_episodes) - 8} 个）" if len(missing_episodes) > 8 else ""
-        raise ValueError(f"以下文件无法识别 SxxExx 季集号，未改名：{examples}{extra}")
+        raise ValueError(
+            "以下文件无法识别 SxxExx 季集号，也无法识别 SxxDxx/第N季第N碟，"
+            f"未改名：{examples}{extra}"
+        )
     probes.sort(key=lambda item: (*_episode_sort_key(item[1].episode or ""), str(item[0]).casefold()))
 
-    first_path, _first_hints = probes[0]
-    print(f"正在探测代表集 MediaInfo：{first_path.relative_to(root)}（其余 {len(paths) - 1} 集复用）")
-    first_media = read_mediainfo(first_path)
-    probes[0] = (first_path, filename_hints(first_path, first_media))
+    disc_collection = all(
+        path.suffix.casefold() == ".iso" and re.fullmatch(r"S\d{2}D\d{2}", hints.episode or "", re.I)
+        for path, hints in probes
+    )
+    first_path, first_hints = probes[0]
+    cached_technical: tuple[str, str, str] | None = None
+    if disc_collection:
+        source_hint = None if args.source == "auto" else _canonical_source(args.source)
+        source_hint = _canonical_source(source_hint or first_hints.source) or ""
+        if source_hint not in {"BluRay", "UHD BluRay"}:
+            raise ValueError("剧集 ISO 光盘无法判断为 Blu-ray；请传 --source BluRay 或 --source 'UHD BluRay'")
+        print(
+            f"正在探测代表光盘 BDInfo：{first_path.relative_to(root)}"
+            f"（其余 {len(paths) - 1} 张光盘复用）"
+        )
+        with tempfile.TemporaryDirectory(prefix="mteam-post-bdinfo-") as temporary_directory:
+            technical_type, technical_text, _temporary_path, selected_playlist = prepare_technical_info(
+                first_path,
+                first_path.name,
+                source_hint,
+                Path(temporary_directory),
+                bdinfo_report=args.bdinfo_report,
+                bdinfo_exe=args.bdinfo_exe,
+                bdinfo_playlist=args.bdinfo_playlist,
+            )
+        first_media = _media_from_bdinfo(technical_text, source_hint)
+        cached_technical = (technical_type, technical_text, selected_playlist)
+    else:
+        print(f"正在探测代表集 MediaInfo：{first_path.relative_to(root)}（其余 {len(paths) - 1} 集复用）")
+        first_media = read_mediainfo(first_path)
+
+    refreshed_hints = filename_hints(first_path, first_media)
+    first_hints = replace(
+        refreshed_hints,
+        episode=first_hints.episode,
+        group=first_hints.group or refreshed_hints.group,
+    )
+    probes[0] = (first_path, first_hints)
     shared_args = argparse.Namespace(**vars(args))
     shared_args.kind = "tv"
-    shared_args.episode = None
+    shared_args.episode = first_hints.episode
+    if shared_args.group is None:
+        shared_args.group = first_hints.group
     base_title, year, common_source, common_group, edition, _episode, common_platform = _resolve_fields(
         shared_args, first_path, first_media
     )
@@ -1053,9 +1302,20 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
 
     output_dir = (args.output or root.parent / f"{pack_title}.prepare").resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
-    media_text = read_mediainfo_text(representative.source_path, representative.target_path.name)
-    media_path = output_dir / "mediainfo.txt"
-    media_path.write_text(media_text, encoding="utf-8")
+    if cached_technical:
+        technical_info_type, media_text, bdinfo_playlist = cached_technical
+        media_path = output_dir / "bdinfo.txt"
+        media_path.write_text(media_text, encoding="utf-8")
+    else:
+        technical_info_type, media_text, media_path, bdinfo_playlist = prepare_technical_info(
+            representative.source_path,
+            representative.target_path.name,
+            representative.source,
+            output_dir,
+            bdinfo_report=args.bdinfo_report,
+            bdinfo_exe=args.bdinfo_exe,
+            bdinfo_playlist=args.bdinfo_playlist,
+        )
     file_records: list[dict[str, Any]] = []
     for index, plan in enumerate(provisional, start=1):
         file_records.append(
@@ -1070,6 +1330,9 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
                 "media": asdict(plan.media),
                 "mediainfo_path": str(media_path) if index == 1 else "",
                 "mediainfo_text": media_text if index == 1 else "",
+                "technical_info_type": technical_info_type if index == 1 else "",
+                "technical_info_path": str(media_path) if index == 1 else "",
+                "technical_info_text": media_text if index == 1 else "",
                 "media_inherited_from": str(representative.source_path),
             }
         )
@@ -1083,6 +1346,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             output_dir / "screenshots",
             args.screenshots,
             args.screenshot_source,
+            first_only=disc_collection,
         )
 
     torrent_path = output_dir / f"{pack_title}.torrent"
@@ -1118,6 +1382,10 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         "media_probe_path": str(representative.source_path),
         "mediainfo_text": media_text,
         "mediainfo_path": str(media_path),
+        "technical_info_type": technical_info_type,
+        "technical_info_text": media_text,
+        "technical_info_path": str(media_path),
+        "bdinfo_playlist": bdinfo_playlist,
         "files": file_records,
         "screenshots": [str(item) for item in screenshot_paths],
         "torrent": {
@@ -1150,7 +1418,12 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     print(f"  副标题：{subtitle or '未识别'}")
     print(f"  分类：{category}")
     print(f"  豆瓣：{douban.url if douban else '未找到，请手工补充'}")
-    print(f"  MediaInfo：1 份（探测 {representative.source_path.relative_to(root)}）")
+    print(
+        f"  {technical_info_type}：1 份"
+        f"（探测 {representative.source_path.relative_to(root)}，其余光盘复用）"
+        if disc_collection
+        else f"  {technical_info_type}：1 份（探测 {representative.source_path.relative_to(root)}）"
+    )
     print(f"  截图：{len(screenshot_paths)} 张")
     if not args.skip_torrent:
         print(f"  V1 私有多文件种子：{torrent_path}")

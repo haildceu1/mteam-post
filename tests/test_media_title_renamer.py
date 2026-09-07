@@ -5,6 +5,7 @@ from pathlib import Path
 from media_title_renamer.cli import (
     VIDEO_EXTENSIONS,
     _dvd_disc_label,
+    _infer_source,
     _video_paths,
     build_title,
     filename_hints,
@@ -42,6 +43,12 @@ def media_json(*, writing_library="", audio_format="DTS", audio_profile="MA / Co
 
 
 class MediaTitleRenamerTests(unittest.TestCase):
+    def test_large_untagged_iso_is_inferred_as_bluray(self):
+        self.assertEqual(
+            _infer_source("第1碟", ".iso", file_size=42_610_000_000),
+            "BluRay",
+        )
+
     def test_directory_input_recurses_automatically(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

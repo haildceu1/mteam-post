@@ -12,6 +12,10 @@ from media_title_renamer.cli import MediaInfo
 from media_title_renamer.prepare import (
     _bdinfo_list_command,
     _bdinfo_scan_command,
+    _bracket_release_group,
+    _disc_episode,
+    _embedded_tmdb_id,
+    _media_from_bdinfo,
     DoubanMatch,
     TmdbMatch,
     _extract_screenshots,
@@ -28,6 +32,103 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_tv_disc_iso_hints_support_chinese_season_and_disc(self):
+        root = Path(r"D:\永不者-The.Nevers-{tmdb=80828}")
+        first = root / "[永不者第一季.The.Nevers.2021][第1碟.DIY官译简繁中字][TTG][42.61GB].iso"
+        second = root / "[永不者第一季.The.Nevers.2021][第2碟.DIY官译简繁中字][TTG][42.61GB].ISO"
+
+        self.assertEqual(_disc_episode(first, root), "S01D01")
+        self.assertEqual(_disc_episode(second, root), "S01D02")
+        self.assertEqual(_disc_episode(root / "The.Nevers.S01D02.iso", root), "S01D02")
+        self.assertEqual(_bracket_release_group(first), "TTG")
+        self.assertEqual(_embedded_tmdb_id(root), 80828)
+
+    def test_bdinfo_report_can_supply_disc_set_title_media(self):
+        report = """
+VIDEO:
+MPEG-H HEVC Video / 62000 kbps / 2160p / 23.976 fps / 16:9 / HDR10 / Dolby Vision
+AUDIO:
+Dolby TrueHD/Atmos Audio English / 4608 kbps / 7.1 / 48 kHz
+Dolby Digital Audio Chinese / 640 kbps / 5.1 / 48 kHz
+SUBTITLES:
+English
+"""
+        media = _media_from_bdinfo(report, "UHD BluRay")
+
+        self.assertEqual(media.resolution, "2160p")
+        self.assertEqual(media.video_codec, "HEVC")
+        self.assertEqual(media.hdr, ("HDR10", "DoVi"))
+        self.assertEqual(media.audio_codec, "TrueHD Atmos")
+        self.assertEqual(media.audio_channels, "7.1")
+        self.assertEqual(media.audio_tracks, 2)
+
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    def test_tv_bluray_disc_folder_uses_one_bdinfo_and_renames_by_disc(
+        self,
+        read_mediainfo,
+        prepare_technical_info_mock,
+    ):
+        report = """
+PLAYLIST REPORT:
+Name: 00001.MPLS
+VIDEO:
+MPEG-4 AVC Video / 30000 kbps / 1080p / 23.976 fps / 16:9
+AUDIO:
+Dolby TrueHD Audio English / 3000 kbps / 5.1 / 48 kHz
+SUBTITLES:
+English
+"""
+        prepare_technical_info_mock.return_value = (
+            "BDInfo",
+            report,
+            Path("temporary-bdinfo.txt"),
+            "00001",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "永不者-The.Nevers-{tmdb=80828}"
+            root.mkdir()
+            first = root / "[永不者第一季.The.Nevers.2021][第1碟.DIY官译简繁中字][TTG][42.61GB].iso"
+            second = root / "[永不者第一季.The.Nevers.2021][第2碟.DIY官译简繁中字][TTG][42.61GB].ISO"
+            first.write_bytes(b"disc one")
+            second.write_bytes(b"disc two")
+
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root),
+                        "--title",
+                        "The Nevers",
+                        "--year",
+                        "2021",
+                        "--source",
+                        "BluRay",
+                        "--offline",
+                        "--douban-url",
+                        "https://movie.douban.com/subject/1/",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                        "--apply",
+                    ]
+                )
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            prepared_files = sorted(str(path.relative_to(root)) for path in root.rglob("*.iso"))
+
+        read_mediainfo.assert_not_called()
+        prepare_technical_info_mock.assert_called_once()
+        self.assertEqual(package["episode"], "S01")
+        self.assertEqual(package["category"], "影剧/综艺/BluRay")
+        self.assertEqual(package["technical_info_type"], "BDInfo")
+        self.assertEqual(package["bdinfo_playlist"], "00001")
+        self.assertEqual(package["group"], "TTG")
+        self.assertEqual(
+            prepared_files,
+            [
+                str(Path("Season 01") / "The Nevers 2021 S01D01 1080p BluRay AVC TrueHD5.1-TTG.iso"),
+                str(Path("Season 01") / "The Nevers 2021 S01D02 1080p BluRay AVC TrueHD5.1-TTG.iso"),
+            ],
+        )
+
     @patch("random_video_screenshots.cli.extract_screenshots")
     def test_screenshot_result_excludes_stale_files(self, extract_screenshots):
         def create_new_file(_video, output, *, count):

@@ -166,6 +166,9 @@ media-title-rename prepare "F:\20.22" --apply
 # 分季放在子目录也会自动递归处理
 media-title-rename prepare "F:\TV\20.22" --apply
 
+# 剧集蓝光 ISO：从“第一季/第1碟”识别为 S01D01，并自动使用 BDInfo
+media-title-rename prepare "D:\永不者-The.Nevers-{tmdb=80828}" --apply
+
 # 自动匹配不确定时可以明确指定
 media-title-rename prepare "F:\Videos\Example.ts" `
   --tmdb-id 12345 `
@@ -176,6 +179,8 @@ media-title-rename prepare "F:\Videos\Example.ts" `
 种子配置与 qBittorrent 图示一致：V1、自动分块、`private=1`，Tracker URL、Web 种子、注释和 `source` 默认留空。种子中的文件名使用规范新名称；不带 `--apply` 时源文件保持原名，因此正式做种前应确认并执行重命名。
 
 文件夹模式专用于剧集：它会先检查全部目标文件名，支持 `S01E01`、`S01E01-E02` 和 `S01E01E02`（自动规范为 `S01E01-E02`）等季集写法；任何一集缺少季集号或发生重名时都不会改动任何文件。执行 `--apply` 时会自动建立 `Season 01`、`Season 02` 等分季子文件夹，把全部视频移动到对应季并规范改名。文件按季集号排序后只探测第一集并生成一份 MediaInfo Text，其分辨率、视频编码和音频参数会用于整季重命名及发布页；TMDB/豆瓣也只查询一次。默认的 4 张截图仍会尽量均匀选自不同集。最终生成一个 V1 私有多文件种子，种子根目录保留原文件夹名和分季结构。
+
+剧集蓝光 ISO 也支持文件夹模式。季数可以写成 `第一季`、`第1季`、`Season 1` 或 `S01`；碟号可以写成 `第1碟`、`第1盘`、`Disc 1`、`Disk 1` 或 `D01`。例如 `[永不者第一季.The.Nevers.2021][第1碟][TTG].iso` 会规范为含 `S01D01` 的文件名并移入 `Season 01`，第 2 碟相应为 `S01D02`。程序只对第一张光盘运行一次 BDInfo 并从第一张光盘生成 4 张截图，其余光盘复用技术参数；所有光盘仍会一起写入同一个 V1 私有多文件种子。大于 DVD9 容量且没有写 `BluRay` 的 ISO 会按 Blu-ray 原盘识别，目录名中的 `{tmdb=80828}`、`[tmdb=80828]` 也会自动作为 TMDB ID。若容量信息或命名不足以判断来源，可显式添加 `--source BluRay` 或 `--source "UHD BluRay"`。
 
 ### TMDB 名称增强
 
@@ -212,6 +217,9 @@ media-title-rename publish "F:\TV\20.22"
 
 # 没有资料包：执行一次新的准备流程
 media-title-rename publish "F:\TV\20.22" --apply
+
+# 剧集蓝光 ISO 光盘文件夹：识别“第一季/第1碟、第2碟”，一次准备并填表
+media-title-rename publish "D:\永不者-The.Nevers-{tmdb=80828}" --apply
 
 # 即使存在资料包，也强制重新准备
 media-title-rename publish "F:\TV\20.22" --refresh-prepare --apply
