@@ -87,6 +87,19 @@ class PublishTests(unittest.TestCase):
                 Path(r"E:\Profiles\mteam"),
             )
 
+    def test_linux_profile_directory_uses_xdg_config_home(self) -> None:
+        with (
+            patch("media_title_renamer.publish.sys.platform", "linux"),
+            patch.dict(
+                os.environ,
+                {"MTEAM_PROFILE_DIR": "", "XDG_CONFIG_HOME": "/tmp/xdg-config"},
+            ),
+        ):
+            self.assertEqual(
+                publish._default_profile_dir(),
+                Path("/tmp/xdg-config/mteam-post/chrome-profile"),
+            )
+
     @patch("media_title_renamer.publish.mteam_fill_main")
     @patch("media_title_renamer.publish.prepare_main")
     def test_combines_prepare_and_form_fill(self, prepare_main, mteam_fill_main) -> None:

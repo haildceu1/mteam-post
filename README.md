@@ -105,11 +105,104 @@ media-title-rename publish "F:\TV\20.22" `
   --keep-open
 ```
 
-单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并在简介末尾自动回车两次后追加截图。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。`publish` 的 Chrome 配置目录按以下顺序自动选择：环境变量 `MTEAM_PROFILE_DIR`、本机已有的 `D:\Cinema\mteam`、最后是 `%LOCALAPPDATA%\mteam-post\chrome-profile`；通常无需再写 `--profile-dir`，仍可用该参数临时覆盖。
+单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并在简介末尾自动回车两次后追加截图。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。`publish` 会先读取环境变量 `MTEAM_PROFILE_DIR`；未设置时，Windows 优先复用本机已有的 `D:\Cinema\mteam`，否则使用 `%LOCALAPPDATA%\mteam-post\chrome-profile`，Ubuntu 使用 `${XDG_CONFIG_HOME:-$HOME/.config}/mteam-post/chrome-profile`。通常无需再写 `--profile-dir`，仍可用该参数临时覆盖。
 
 升级项目时执行：
 
 ```powershell
+git pull
+python -m pip install -e .
+```
+
+## 在 Ubuntu 22.04 电脑复现
+
+以下命令在 Ubuntu 22.04 x86-64 上验证。普通视频和剧集只需要 MediaInfo 与 FFmpeg；ISO 自动挂载还需要 `udisks2`（UDF 原盘首选）或备用的 `fuseiso`，Blu-ray/UHD ISO 另需 `bdinfo-rs`，自动填写发布页则需要图形桌面和 Google Chrome。
+
+### 1. 安装系统依赖
+
+```bash
+sudo apt update
+sudo apt install -y git python3-venv mediainfo ffmpeg udisks2 fuseiso curl ca-certificates
+
+# 需要自动填写 M-Team 发布页时安装 Google Chrome
+chrome_deb="$(mktemp --suffix=.deb)"
+curl -fL "https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb" -o "$chrome_deb"
+sudo apt install -y "$chrome_deb"
+rm -f "$chrome_deb"
+
+# 仅处理 Blu-ray/UHD ISO 时需要；使用 bdinfo-rs 4.0.0 官方安装脚本
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/agentjp/bdinfo-rs/releases/download/v4.0.0/bdinfo-rs-installer.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+验证系统依赖：
+
+```bash
+git --version
+python3 --version
+mediainfo --version
+ffmpeg -version
+ffprobe -version
+fuseiso --version
+udisksctl status
+google-chrome --version
+bdinfo-rs --version
+```
+
+不使用网页填写或 Blu-ray ISO 时，可以分别跳过 Chrome 或 `bdinfo-rs` 的安装及检查。若安装器把 `bdinfo-rs` 放到 `~/.local/bin`，请把上面的 `export PATH=...` 加入 `~/.profile`，以后重新登录也能直接调用。
+
+### 2. 下载并安装本项目
+
+```bash
+git clone https://github.com/haildceu1/mteam-post.git
+cd mteam-post
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e .
+```
+
+验证安装和 Linux 回归测试：
+
+```bash
+media-title-rename --help
+python -m unittest discover -s tests -v
+```
+
+### 3. 配置 TMDB（推荐）
+
+```bash
+export TMDB_READ_ACCESS_TOKEN="你的 API Read Access Token"
+```
+
+只需当前终端使用时执行上面一行即可；长期使用可把它安全地配置到 `~/.profile` 或你使用的密钥管理工具中。不要把令牌、Cookie 或请求头提交到 Git。
+
+### 4. 首次登录 M-Team
+
+请在 Ubuntu 图形桌面的终端中运行，不要在没有 `DISPLAY` 的纯 SSH 会话中启动浏览器：
+
+```bash
+media-title-rename mteam-fill --login-only \
+  --profile-dir "${XDG_CONFIG_HOME:-$HOME/.config}/mteam-post/chrome-profile" \
+  --url "https://kp.m-team.cc/"
+```
+
+在打开的 ChromeDriver 窗口中完成登录。程序检测到 `localStorage auth` 后会自动继续；以后复用同一个配置目录。
+
+### 5. 一条命令准备并填写发布页
+
+```bash
+media-title-rename publish "/data/TV/20.22" \
+  --apply \
+  --keep-open
+```
+
+Ubuntu 下 `publish` 的默认 Chrome 配置目录为 `${XDG_CONFIG_HOME:-$HOME/.config}/mteam-post/chrome-profile`。处理 ISO 时，程序优先通过 `udisksctl` 只读挂载（支持 Blu-ray 使用的 UDF），没有桌面授权时改用免密码 `sudo mount`，最后再回退到 `fuseiso`，截图结束后自动卸载；复杂原盘仍可通过 `--screenshot-source` 明确指定正片文件。
+
+升级项目时执行：
+
+```bash
 git pull
 python -m pip install -e .
 ```
@@ -286,7 +379,7 @@ media-title-rename mteam-fill --login-only `
 
 ### ISO 截图
 
-Windows 下会临时挂载 ISO，从 `BDMV/STREAM` 或 `VIDEO_TS` 中选择最大的正片文件截图，并在完成后卸载；已经由用户挂载的 ISO 不会被卸载。复杂的无缝分支蓝光如果自动选择不正确，可使用：
+Windows 使用系统磁盘映像功能，Ubuntu 依次尝试 `udisksctl`、免密码 `sudo mount` 和 `fuseiso`，都会以临时挂载方式从 `BDMV/STREAM` 或 `VIDEO_TS` 中选择最大的正片文件截图，并在完成后卸载；Windows 下已经由用户挂载的 ISO 不会被卸载。复杂的无缝分支蓝光如果自动选择不正确，可使用：
 
 ```powershell
 media-title-rename prepare "E:\Movie\Disc.iso" --screenshot-source "M:\BDMV\STREAM\00001.m2ts"
@@ -349,14 +442,36 @@ media-title-rename publish "D:\Movie\Disc.prepare\mteam-prepare.json" `
 
 ### `Blu-ray ISO 必须使用 BDInfo`
 
-先安装并重新打开 PowerShell：
+Windows 下先安装并重新打开 PowerShell：
 
 ```powershell
 winget install agentjp.bdinfo-rs
 bdinfo-rs --version
 ```
 
-若不方便重启终端，可以暂时用 `--bdinfo-exe "bdinfo-rs.exe 的完整路径"`。已有图形版 BDInfo Text 报告时则使用 `--bdinfo-report`。
+Ubuntu 下使用官方安装脚本，并确认 `~/.local/bin` 已加入 `PATH`：
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/agentjp/bdinfo-rs/releases/download/v4.0.0/bdinfo-rs-installer.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
+bdinfo-rs --version
+```
+
+若不方便重启终端，可以暂时用 `--bdinfo-exe "bdinfo-rs 或 bdinfo-rs.exe 的完整路径"`。已有图形版 BDInfo Text 报告时则使用 `--bdinfo-report`。
+
+### Ubuntu 无法自动挂载 ISO
+
+先确认 `udisks2`、备用的 `fuseiso` 与 FUSE 卸载工具可用：
+
+```bash
+sudo apt install -y udisks2 fuseiso
+udisksctl status
+fuseiso --version
+fusermount3 --version
+```
+
+程序使用 `ro,nosuid,nodev,noexec` 只读挂载 ISO，并在截图完成后自动卸载临时设备或目录。`udisksctl` 需要可用的系统 D-Bus/udisks 服务；没有桌面授权的纯 SSH 会话会继续尝试 `sudo -n mount`，再尝试 `fuseiso`。如果这三种方式都不可用，请先在宿主机挂载 ISO，再用 `--screenshot-source /挂载点/BDMV/STREAM/00001.m2ts` 指定正片文件。
 
 ### `REPORT_DEST must be given if BD_PATH is an ISO`
 

@@ -103,6 +103,13 @@ class DoubanMatch:
     score: float
 
 
+@dataclass(frozen=True)
+class IsoMount:
+    root: Path
+    cleanup_method: str = ""
+    cleanup_target: Path | str | None = None
+
+
 def _normalise_name(value: str) -> str:
     return re.sub(r"[^0-9a-z\u3400-\u9fff]+", "", value.casefold())
 
@@ -526,9 +533,14 @@ def _find_bdinfo_cli(explicit: str | None = None) -> str:
     found = shutil.which("bdinfo-rs") or shutil.which("bdinfo-rs.exe")
     if found:
         return found
+    install_hint = (
+        "请使用 bdinfo-rs 官方安装脚本安装，或设置 BDINFO_PATH；"
+        if sys.platform.startswith("linux")
+        else "请先运行 `winget install agentjp.bdinfo-rs`，"
+    )
     raise FileNotFoundError(
-        "Blu-ray ISO 必须使用 BDInfo：请先运行 `winget install agentjp.bdinfo-rs`，"
-        "或用 --bdinfo-report 指定已由图形版 BDInfo 保存的 Text 报告"
+        "Blu-ray ISO 必须使用 BDInfo：" + install_hint
+        + "或用 --bdinfo-report 指定已由图形版 BDInfo 保存的 Text 报告"
     )
 
 
@@ -677,9 +689,142 @@ def _extract_screenshots(video: Path, output: Path, count: int) -> list[Path]:
     return sorted(generated)
 
 
-def _mount_iso(path: Path) -> tuple[Path, bool]:
+def _mount_iso(path: Path) -> IsoMount:
+    if sys.platform.startswith("linux"):
+        errors: list[str] = []
+        udisksctl = shutil.which("udisksctl")
+        if udisksctl:
+            environment = os.environ.copy()
+            environment["LC_ALL"] = "C"
+            loop_result = subprocess.run(
+                [
+                    udisksctl,
+                    "loop-setup",
+                    "--read-only",
+                    "--no-user-interaction",
+                    "--file",
+                    str(path),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                env=environment,
+            )
+            loop_output = loop_result.stdout + loop_result.stderr
+            device_match = re.search(r"/dev/loop\d+", loop_output)
+            if loop_result.returncode == 0 and device_match:
+                device = device_match.group(0)
+                mount_result = subprocess.run(
+                    [
+                        udisksctl,
+                        "mount",
+                        "--no-user-interaction",
+                        "--block-device",
+                        str(device),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=environment,
+                )
+                if mount_result.returncode == 0:
+                    mount_root = ""
+                    findmnt = shutil.which("findmnt")
+                    if findmnt:
+                        find_result = subprocess.run(
+                            [findmnt, "--noheadings", "--raw", "--source", str(device), "--output", "TARGET"],
+                            capture_output=True,
+                            text=True,
+                            encoding="utf-8",
+                            errors="replace",
+                            env=environment,
+                        )
+                        if find_result.returncode == 0:
+                            mount_root = find_result.stdout.strip().splitlines()[0] if find_result.stdout.strip() else ""
+                    if not mount_root:
+                        root_match = re.search(r"\bat (.+?)\.?\s*$", mount_result.stdout, re.M)
+                        mount_root = root_match.group(1) if root_match else ""
+                    if mount_root and Path(mount_root).is_dir():
+                        return IsoMount(Path(mount_root), "udisks", device)
+                    errors.append("udisksctl 已挂载镜像，但无法确定挂载目录")
+                    subprocess.run(
+                        [udisksctl, "unmount", "--no-user-interaction", "--block-device", str(device)],
+                        capture_output=True,
+                        env=environment,
+                    )
+                else:
+                    errors.append(
+                        "udisksctl mount: "
+                        + (mount_result.stderr.strip() or mount_result.stdout.strip() or f"退出码 {mount_result.returncode}")
+                    )
+                subprocess.run(
+                    [udisksctl, "loop-delete", "--no-user-interaction", "--block-device", str(device)],
+                    capture_output=True,
+                    env=environment,
+                )
+            else:
+                errors.append(
+                    "udisksctl loop-setup: "
+                    + (loop_result.stderr.strip() or loop_result.stdout.strip() or f"退出码 {loop_result.returncode}")
+                )
+
+        sudo = shutil.which("sudo")
+        mount_executable = shutil.which("mount")
+        if sudo and mount_executable:
+            mount_root = Path(tempfile.mkdtemp(prefix="mteam-post-iso-"))
+            result = subprocess.run(
+                [
+                    sudo,
+                    "-n",
+                    mount_executable,
+                    "-o",
+                    "loop,ro,nosuid,nodev,noexec",
+                    str(path),
+                    str(mount_root),
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode == 0:
+                return IsoMount(mount_root, "sudo", mount_root)
+            shutil.rmtree(mount_root, ignore_errors=True)
+            errors.append(
+                "sudo mount: "
+                + (result.stderr.strip() or result.stdout.strip() or f"退出码 {result.returncode}")
+            )
+        fuseiso = shutil.which("fuseiso")
+        if fuseiso:
+            mount_root = Path(tempfile.mkdtemp(prefix="mteam-post-iso-"))
+            result = subprocess.run(
+                [fuseiso, str(path), str(mount_root)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            if result.returncode == 0:
+                return IsoMount(mount_root, "fuseiso", mount_root)
+            shutil.rmtree(mount_root, ignore_errors=True)
+            errors.append(
+                "fuseiso: "
+                + (result.stderr.strip() or result.stdout.strip() or f"退出码 {result.returncode}")
+            )
+        detail = "；".join(errors)
+        raise RuntimeError(
+            "Ubuntu 无法自动挂载 ISO。请安装 udisks2（推荐，支持 Blu-ray UDF）"
+            "或 fuseiso；纯 SSH 会话推荐配置免密码 sudo，"
+            "也可用 --screenshot-source 指定已挂载的视频文件"
+            + (f"。详情：{detail}" if detail else "")
+        )
     if sys.platform != "win32":
-        raise RuntimeError("ISO 自动挂载目前只支持 Windows；可用 --screenshot-source 指定已挂载的视频文件")
+        raise RuntimeError(
+            "ISO 自动挂载目前支持 Windows 和 Linux；"
+            "可用 --screenshot-source 指定已挂载的视频文件"
+        )
     script = r"""
 $p=$env:MEDIA_TITLE_ISO_PATH
 $image=Get-DiskImage -ImagePath $p -ErrorAction SilentlyContinue
@@ -702,22 +847,113 @@ if(-not $volume){throw '挂载成功但没有找到盘符'}
     if result.returncode != 0:
         raise RuntimeError("无法挂载 ISO：" + (result.stderr.strip() or result.stdout.strip()))
     data = json.loads(result.stdout)
-    return Path(data["root"]), bool(data["mountedByUs"])
-
-
-def _unmount_iso(path: Path) -> None:
-    environment = os.environ.copy()
-    environment["MEDIA_TITLE_ISO_PATH"] = str(path)
-    subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-Command",
-            "Dismount-DiskImage -ImagePath $env:MEDIA_TITLE_ISO_PATH -ErrorAction SilentlyContinue",
-        ],
-        capture_output=True,
-        env=environment,
+    return IsoMount(
+        Path(data["root"]),
+        "windows" if bool(data["mountedByUs"]) else "",
+        path if bool(data["mountedByUs"]) else None,
     )
+
+
+def _unmount_iso(mount: IsoMount) -> None:
+    if mount.cleanup_method == "windows" and mount.cleanup_target:
+        environment = os.environ.copy()
+        environment["MEDIA_TITLE_ISO_PATH"] = str(mount.cleanup_target)
+        subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-Command",
+                "Dismount-DiskImage -ImagePath $env:MEDIA_TITLE_ISO_PATH -ErrorAction SilentlyContinue",
+            ],
+            capture_output=True,
+            env=environment,
+        )
+        return
+    if mount.cleanup_method == "fuseiso" and mount.cleanup_target:
+        unmounter = shutil.which("fusermount3") or shutil.which("fusermount")
+        if not unmounter:
+            raise RuntimeError(
+                f"找不到 fusermount，无法卸载临时 ISO：{mount.cleanup_target}"
+            )
+        result = subprocess.run(
+            [unmounter, "-u", str(mount.cleanup_target)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "无法卸载临时 ISO："
+                + (result.stderr.strip() or result.stdout.strip() or f"退出码 {result.returncode}")
+            )
+        shutil.rmtree(mount.cleanup_target, ignore_errors=True)
+        return
+    if mount.cleanup_method == "udisks" and mount.cleanup_target:
+        udisksctl = shutil.which("udisksctl")
+        if not udisksctl:
+            raise RuntimeError(
+                f"找不到 udisksctl，无法卸载临时 ISO：{mount.cleanup_target}"
+            )
+        environment = os.environ.copy()
+        environment["LC_ALL"] = "C"
+        unmount_result = subprocess.run(
+            [
+                udisksctl,
+                "unmount",
+                "--no-user-interaction",
+                "--block-device",
+                str(mount.cleanup_target),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+        )
+        delete_result = subprocess.run(
+            [
+                udisksctl,
+                "loop-delete",
+                "--no-user-interaction",
+                "--block-device",
+                str(mount.cleanup_target),
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+        )
+        if unmount_result.returncode != 0 or delete_result.returncode != 0:
+            detail = (
+                unmount_result.stderr.strip()
+                or delete_result.stderr.strip()
+                or unmount_result.stdout.strip()
+                or delete_result.stdout.strip()
+            )
+            raise RuntimeError("无法卸载临时 ISO：" + (detail or "udisksctl 执行失败"))
+        return
+    if mount.cleanup_method == "sudo" and mount.cleanup_target:
+        sudo = shutil.which("sudo")
+        umount = shutil.which("umount")
+        if not sudo or not umount:
+            raise RuntimeError(
+                f"找不到 sudo/umount，无法卸载临时 ISO：{mount.cleanup_target}"
+            )
+        result = subprocess.run(
+            [sudo, "-n", umount, str(mount.cleanup_target)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "无法卸载临时 ISO："
+                + (result.stderr.strip() or result.stdout.strip() or f"退出码 {result.returncode}")
+            )
+        shutil.rmtree(mount.cleanup_target, ignore_errors=True)
 
 
 @contextmanager
@@ -730,16 +966,16 @@ def screenshot_source(path: Path, override: Path | None = None) -> Iterator[Path
     if path.suffix.lower() != ".iso":
         yield path
         return
-    root, mounted_by_us = _mount_iso(path)
+    mount = _mount_iso(path)
     try:
-        candidates = list((root / "BDMV" / "STREAM").glob("*.m2ts"))
-        candidates += list((root / "VIDEO_TS").glob("VTS_*_[1-9].VOB"))
+        candidates = list((mount.root / "BDMV" / "STREAM").glob("*.m2ts"))
+        candidates += list((mount.root / "VIDEO_TS").glob("VTS_*_[1-9].VOB"))
         if not candidates:
             raise RuntimeError("ISO 中没有找到可用于截图的 M2TS/VOB；请用 --screenshot-source 指定视频文件")
         yield max(candidates, key=lambda item: item.stat().st_size)
     finally:
-        if mounted_by_us:
-            _unmount_iso(path)
+        if mount.cleanup_method:
+            _unmount_iso(mount)
 
 
 def _manual_douban(url: str) -> DoubanMatch:

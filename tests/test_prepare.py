@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -16,7 +17,10 @@ from media_title_renamer.prepare import (
     _disc_episode,
     _embedded_tmdb_id,
     _media_from_bdinfo,
+    _mount_iso,
+    _unmount_iso,
     DoubanMatch,
+    IsoMount,
     TmdbMatch,
     _extract_screenshots,
     automatic_piece_length,
@@ -32,6 +36,137 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_linux_iso_mount_prefers_udisks_for_udf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            disc = root / "Disc.iso"
+            disc.write_bytes(b"iso")
+            mount_root = root / "mounted-disc"
+            mount_root.mkdir()
+
+            def find_tool(name: str):
+                return {
+                    "udisksctl": "/usr/bin/udisksctl",
+                    "findmnt": "/usr/bin/findmnt",
+                }.get(name)
+
+            results = [
+                subprocess.CompletedProcess([], 0, "Mapped file Disc.iso as /dev/loop7.\n", ""),
+                subprocess.CompletedProcess([], 0, "Mounted /dev/loop7 at /media/test/DISC.\n", ""),
+                subprocess.CompletedProcess([], 0, str(mount_root) + "\n", ""),
+                subprocess.CompletedProcess([], 0, "Unmounted /dev/loop7.\n", ""),
+                subprocess.CompletedProcess([], 0, "", ""),
+            ]
+            with (
+                patch("media_title_renamer.prepare.sys.platform", "linux"),
+                patch("media_title_renamer.prepare.shutil.which", side_effect=find_tool),
+                patch("media_title_renamer.prepare.subprocess.run", side_effect=results) as run,
+            ):
+                mount = _mount_iso(disc)
+                self.assertEqual(mount, IsoMount(mount_root, "udisks", "/dev/loop7"))
+                _unmount_iso(mount)
+
+            self.assertEqual(
+                run.call_args_list[0].args[0],
+                [
+                    "/usr/bin/udisksctl",
+                    "loop-setup",
+                    "--read-only",
+                    "--no-user-interaction",
+                    "--file",
+                    str(disc),
+                ],
+            )
+            self.assertEqual(
+                run.call_args_list[-1].args[0],
+                [
+                    "/usr/bin/udisksctl",
+                    "loop-delete",
+                    "--no-user-interaction",
+                    "--block-device",
+                    "/dev/loop7",
+                ],
+            )
+
+    def test_linux_iso_mount_uses_fuseiso_and_cleans_up(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            disc = root / "Disc.iso"
+            disc.write_bytes(b"iso")
+            mount_root = root / "mount"
+            mount_root.mkdir()
+
+            def find_tool(name: str):
+                return {
+                    "fuseiso": "/usr/bin/fuseiso",
+                    "fusermount3": "/usr/bin/fusermount3",
+                }.get(name)
+
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                patch("media_title_renamer.prepare.sys.platform", "linux"),
+                patch("media_title_renamer.prepare.shutil.which", side_effect=find_tool),
+                patch("media_title_renamer.prepare.tempfile.mkdtemp", return_value=str(mount_root)),
+                patch("media_title_renamer.prepare.subprocess.run", return_value=completed) as run,
+            ):
+                mount = _mount_iso(disc)
+                self.assertEqual(mount, IsoMount(mount_root, "fuseiso", mount_root))
+                _unmount_iso(mount)
+
+            self.assertEqual(
+                run.call_args_list[0].args[0],
+                ["/usr/bin/fuseiso", str(disc), str(mount_root)],
+            )
+            self.assertEqual(
+                run.call_args_list[1].args[0],
+                ["/usr/bin/fusermount3", "-u", str(mount_root)],
+            )
+            self.assertFalse(mount_root.exists())
+
+    def test_linux_iso_mount_uses_passwordless_sudo_in_ssh_session(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            disc = root / "Disc.iso"
+            disc.write_bytes(b"iso")
+            mount_root = root / "mount"
+            mount_root.mkdir()
+
+            def find_tool(name: str):
+                return {
+                    "sudo": "/usr/bin/sudo",
+                    "mount": "/usr/bin/mount",
+                    "umount": "/usr/bin/umount",
+                }.get(name)
+
+            completed = subprocess.CompletedProcess([], 0, "", "")
+            with (
+                patch("media_title_renamer.prepare.sys.platform", "linux"),
+                patch("media_title_renamer.prepare.shutil.which", side_effect=find_tool),
+                patch("media_title_renamer.prepare.tempfile.mkdtemp", return_value=str(mount_root)),
+                patch("media_title_renamer.prepare.subprocess.run", return_value=completed) as run,
+            ):
+                mount = _mount_iso(disc)
+                self.assertEqual(mount, IsoMount(mount_root, "sudo", mount_root))
+                _unmount_iso(mount)
+
+            self.assertEqual(
+                run.call_args_list[0].args[0],
+                [
+                    "/usr/bin/sudo",
+                    "-n",
+                    "/usr/bin/mount",
+                    "-o",
+                    "loop,ro,nosuid,nodev,noexec",
+                    str(disc),
+                    str(mount_root),
+                ],
+            )
+            self.assertEqual(
+                run.call_args_list[1].args[0],
+                ["/usr/bin/sudo", "-n", "/usr/bin/umount", str(mount_root)],
+            )
+            self.assertFalse(mount_root.exists())
+
     def test_tv_disc_iso_hints_support_chinese_season_and_disc(self):
         root = Path(r"D:\永不者-The.Nevers-{tmdb=80828}")
         first = root / "[永不者第一季.The.Nevers.2021][第1碟.DIY官译简繁中字][TTG][42.61GB].iso"
