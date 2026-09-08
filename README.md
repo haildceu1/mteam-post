@@ -120,6 +120,15 @@ python -m pip install -e .
 
 ### 1. 安装系统依赖
 
+如果当前 Ubuntu 主机需要通过本机 `7890` 端口访问 GitHub、Google 或 PyPI，先在当前终端设置代理；网络可直连时跳过：
+
+```bash
+export HTTP_PROXY="http://127.0.0.1:7890"
+export HTTPS_PROXY="$HTTP_PROXY"
+```
+
+这两个变量会同时被后续的 `curl`、`git` 和 `pip` 使用，只对当前终端及其子进程生效；需要恢复直连时执行 `unset HTTP_PROXY HTTPS_PROXY`。
+
 ```bash
 sudo apt update
 sudo apt install -y git python3-venv mediainfo ffmpeg udisks2 fuseiso curl ca-certificates
