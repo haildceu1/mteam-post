@@ -673,8 +673,13 @@ def _find_mediainfo() -> str:
     installed = local_app_data / "Programs" / "MediaInfo-CLI" / "MediaInfo.exe"
     if installed.is_file():
         return str(installed)
+    install_hint = (
+        "请执行 `sudo apt install mediainfo`，或将 mediainfo 所在目录加入 PATH。"
+        if sys.platform.startswith("linux")
+        else "请安装它，或将 MediaInfo.exe 所在目录加入 PATH。"
+    )
     raise RuntimeError(
-        "找不到 MediaInfo CLI。请安装它，或将 MediaInfo.exe 所在目录加入 PATH。"
+        "找不到 MediaInfo CLI。" + install_hint
     )
 
 

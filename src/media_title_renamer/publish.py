@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 from .mteam_fill import main as mteam_fill_main
@@ -15,13 +16,17 @@ def _default_profile_dir() -> Path:
     configured = os.environ.get("MTEAM_PROFILE_DIR", "").strip()
     if configured:
         return Path(configured).expanduser()
-    preferred = Path(r"D:\Cinema\mteam")
-    if preferred.is_dir():
-        return preferred
-    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
-    if local_app_data:
-        return Path(local_app_data) / "mteam-post" / "chrome-profile"
-    return Path.home() / "AppData" / "Local" / "mteam-post" / "chrome-profile"
+    if sys.platform == "win32":
+        preferred = Path(r"D:\Cinema\mteam")
+        if preferred.is_dir():
+            return preferred
+        local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+        if local_app_data:
+            return Path(local_app_data) / "mteam-post" / "chrome-profile"
+        return Path.home() / "AppData" / "Local" / "mteam-post" / "chrome-profile"
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    config_home = Path(xdg_config_home).expanduser() if xdg_config_home else Path.home() / ".config"
+    return config_home / "mteam-post" / "chrome-profile"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -51,7 +56,7 @@ def _parser() -> argparse.ArgumentParser:
         "--profile-dir",
         type=Path,
         default=_default_profile_dir(),
-        help="专用 Chrome 配置目录；默认读取 MTEAM_PROFILE_DIR，本机优先使用 D:\\Cinema\\mteam",
+        help="专用 Chrome 配置目录；默认读取 MTEAM_PROFILE_DIR，否则使用系统用户配置目录",
     )
     parser.add_argument("--cookie-file", type=Path, help="M-Team Cookie 导出或请求头复制文件")
     parser.add_argument("--url", default="https://kp.m-team.cc/upload", help="M-Team 发布页地址")
@@ -78,7 +83,8 @@ def _direct_package(path: Path) -> Path | None:
 
 
 def _normalised_path(value: str | Path) -> str:
-    return str(Path(value).resolve()).casefold()
+    # Windows paths are case-insensitive while Linux paths are not.
+    return os.path.normcase(str(Path(value).resolve()))
 
 
 def _find_existing_package(input_path: Path) -> Path:
