@@ -15,6 +15,9 @@ from media_title_renamer.prepare import (
     _bdinfo_scan_command,
     _bracket_release_group,
     _disc_episode,
+    _choose_douban,
+    _douban_search_page_candidates,
+    _douban_for_release,
     _embedded_tmdb_id,
     _media_from_bdinfo,
     _mount_iso,
@@ -23,6 +26,8 @@ from media_title_renamer.prepare import (
     DoubanMatch,
     IsoMount,
     TmdbMatch,
+    TmdbClient,
+    _season_number_from_episode,
     _extract_screenshots,
     automatic_piece_length,
     build_subtitle,
@@ -37,6 +42,96 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_tmdb_season_returns_localized_and_original_names(self):
+        client = TmdbClient(read_token="test-token")
+        responses = [
+            {"id": 1456, "season_number": 7, "name": "第 7 季", "air_date": "2003-09-18"},
+            {"id": 1456, "season_number": 7, "name": "Pearl Islands", "air_date": "2003-09-18"},
+        ]
+        with patch.object(client, "_get", side_effect=responses) as get:
+            season = client.season(14658, 7)
+        self.assertEqual(season.name, "Pearl Islands")
+        self.assertEqual(season.chinese_name, "第 7 季")
+        self.assertEqual(season.year, "2003")
+        self.assertEqual(get.call_count, 2)
+
+    def test_douban_html_search_parses_tv_season(self):
+        html = (
+            '<script>window.__DATA__ = '
+            + json.dumps(
+                {
+                    "items": [
+                        {
+                            "id": 3271362,
+                            "title": "幸存者：珍珠岛 第七季 Survivor: Pearl Islands Season 7 (2003)",
+                            "abstract": "美国 / 真人秀 / 幸存者 第七季 / 45分钟",
+                            "url": "https://movie.douban.com/subject/3271362/",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+            + '; window.__USER__ = {};</script>'
+        )
+        with patch("media_title_renamer.prepare._get_text", return_value=html):
+            candidates = _douban_search_page_candidates("Survivor Pearl Islands Season 7", "2003")
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].id, "3271362")
+        self.assertEqual(candidates[0].title, "幸存者：珍珠岛 第七季")
+        self.assertEqual(candidates[0].original_title, "Survivor: Pearl Islands Season 7")
+        self.assertEqual(candidates[0].year, "2003")
+        self.assertEqual(candidates[0].season_number, 7)
+
+    def test_douban_selection_rejects_a_different_season(self):
+        wrong = DoubanMatch("50", "https://movie.douban.com/subject/50/", "幸存者 第五十季", "Survivor Season 50", "2025", 100, 50)
+        right = DoubanMatch("3271362", "https://movie.douban.com/subject/3271362/", "幸存者：珍珠岛 第七季", "Survivor: Pearl Islands Season 7", "2003", 100, 7)
+        self.assertIs(_choose_douban([wrong, right], expected_season=7), right)
+        self.assertIsNone(_choose_douban([wrong], expected_season=7))
+        self.assertEqual(_season_number_from_episode("S07E01-E02"), 7)
+        self.assertEqual(_season_number_from_episode("S07D01"), 7)
+
+    def test_douban_release_search_uses_tmdb_season_name_and_year(self):
+        args = type("Args", (), {"douban_url": None, "offline": False})()
+        tmdb = TmdbMatch(
+            id=14658,
+            media_type="tv",
+            name="Survivor",
+            chinese_name="幸存者 真人秀",
+            original_name="Survivor",
+            original_language="en",
+            year="2000",
+            imdb_id="tt0239195",
+            genre_ids=(),
+            score=100,
+        )
+        season = type("Season", (), {"name": "Pearl Islands", "year": "2003"})()
+        candidate = DoubanMatch(
+            "3271362",
+            "https://movie.douban.com/subject/3271362/",
+            "幸存者：珍珠岛 第七季",
+            "Survivor: Pearl Islands Season 7",
+            "2003",
+            100,
+            7,
+        )
+        with (
+            patch("media_title_renamer.prepare._tmdb_season_for_release", return_value=season),
+            patch("media_title_renamer.prepare._douban_candidates", return_value=[candidate]) as search,
+        ):
+            result = _douban_for_release(
+                args,
+                tmdb=tmdb,
+                title="Survivor",
+                base_title="Survivor",
+                year="2000",
+                season_number=7,
+            )
+        self.assertIs(result, candidate)
+        names, search_year = search.call_args.args
+        self.assertEqual(search_year, "2003")
+        self.assertEqual(search.call_args.kwargs["expected_season"], 7)
+        self.assertIn("Survivor Pearl Islands", names)
+
     def test_series_folder_name_follows_mteam_template(self):
         self.assertEqual(
             _series_folder_name("Survivor", "2000", 14658),

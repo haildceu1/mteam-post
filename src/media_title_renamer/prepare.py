@@ -94,6 +94,15 @@ class TmdbMatch:
 
 
 @dataclass(frozen=True)
+class TmdbSeason:
+    id: int
+    season_number: int
+    name: str
+    chinese_name: str
+    year: str
+
+
+@dataclass(frozen=True)
 class DoubanMatch:
     id: str
     url: str
@@ -101,6 +110,7 @@ class DoubanMatch:
     original_title: str
     year: str
     score: float
+    season_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -159,6 +169,15 @@ def _get_json(url: str, headers: dict[str, str] | None = None, timeout: int = 12
         return json.loads(response.read().decode("utf-8"))
 
 
+def _get_text(url: str, headers: dict[str, str] | None = None, timeout: int = 12) -> str:
+    request_headers = {"Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0"}
+    if headers:
+        request_headers.update(headers)
+    request = urllib.request.Request(url, headers=request_headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
 class TmdbClient:
     def __init__(self, read_token: str = "", api_key: str = "") -> None:
         self.read_token = read_token.strip()
@@ -203,6 +222,19 @@ class TmdbClient:
 
     def by_id(self, media_type: str, item_id: int) -> TmdbMatch:
         return self._details(media_type, item_id, 100.0)
+
+    def season(self, item_id: int, season_number: int) -> TmdbSeason:
+        """Return the season's localized and original names for a TV title."""
+        zh = self._get(f"/tv/{int(item_id)}/season/{int(season_number)}", language="zh-CN")
+        en = self._get(f"/tv/{int(item_id)}/season/{int(season_number)}", language="en-US")
+        actual_number = int(zh.get("season_number") or en.get("season_number") or season_number)
+        return TmdbSeason(
+            id=int(zh.get("id") or en.get("id") or 0),
+            season_number=actual_number,
+            name=str(en.get("name") or zh.get("name") or ""),
+            chinese_name=str(zh.get("name") or ""),
+            year=_year_from_date(str(zh.get("air_date") or en.get("air_date") or "")),
+        )
 
     def search(self, media_type: str, title: str, year: str | None) -> list[TmdbMatch]:
         endpoint = "tv" if media_type == "tv" else "movie"
@@ -253,9 +285,97 @@ def _choose_tmdb(candidates: list[TmdbMatch]) -> TmdbMatch | None:
     return top
 
 
-def _douban_candidates(names: list[str], year: str | None) -> list[DoubanMatch]:
+def _douban_title_parts(
+    raw_title: str,
+    original_title: str,
+    abstract: str,
+    item_year: str,
+) -> tuple[str, str, str, int | None]:
+    """Split Douban's combined search title and infer its season number."""
+    clean = re.sub(r"[\u200e\u200f\ufeff]", "", raw_title or "").strip()
+    year_match = re.search(r"(?:19|20)\d{2}", clean)
+    year = item_year or (year_match.group(0) if year_match else "")
+    clean = re.sub(r"\s*[（(](?:19|20)\d{2}[）)]\s*$", "", clean).strip()
+    original = (original_title or "").strip()
+    title = clean
+    if not original:
+        # The HTML search page often combines a Chinese title and its original
+        # title in one field, e.g. ``幸存者：珍珠岛 第七季 Survivor: Pearl
+        # Islands Season 7 (2003)``.  Split only before a Latin word so the
+        # Chinese season suffix remains part of the title.
+        boundary = re.search(r"\s+(?=[A-Za-z][A-Za-z0-9])", clean)
+        if boundary and _contains_cjk(clean[: boundary.start()]):
+            title = clean[: boundary.start()].strip()
+            original = clean[boundary.end() :].strip()
+    season = _season_number(" ".join(value for value in (raw_title, original, abstract) if value))
+    return title, original, year, season
+
+
+def _douban_search_page_candidates(
+    query: str,
+    year: str | None,
+) -> list[DoubanMatch]:
+    """Search Douban's regular result page, which includes TV-season entries."""
+    url = "https://search.douban.com/movie/subject_search?search_text=" + urllib.parse.quote(query)
+    text = _get_text(url, headers={"User-Agent": "Mozilla/5.0"})
+    marker = "window.__DATA__"
+    start = text.find(marker)
+    if start < 0:
+        return []
+    payload_start = text.find("{", start)
+    if payload_start < 0:
+        return []
+    data, _end = json.JSONDecoder().raw_decode(text[payload_start:])
+    found: list[DoubanMatch] = []
+    for item in data.get("items", [])[:20]:
+        item_id = str(item.get("id") or "")
+        if not item_id:
+            continue
+        raw_title = str(item.get("title") or "")
+        abstract = str(item.get("abstract") or "")
+        title, original, item_year, season = _douban_title_parts(
+            raw_title,
+            "",
+            abstract,
+            str(item.get("year") or ""),
+        )
+        score = _match_score(query, [title, original, raw_title, abstract], year, item_year)
+        found.append(
+            DoubanMatch(
+                id=item_id,
+                url=str(item.get("url") or f"https://movie.douban.com/subject/{item_id}/"),
+                title=title,
+                original_title=original,
+                year=item_year,
+                score=score,
+                season_number=season,
+            )
+        )
+    return found
+
+
+def _douban_candidates(
+    names: list[str],
+    year: str | None,
+    expected_season: int | None = None,
+) -> list[DoubanMatch]:
     found: dict[str, DoubanMatch] = {}
+
+    def add(candidate: DoubanMatch) -> None:
+        if candidate.id and (candidate.id not in found or candidate.score > found[candidate.id].score):
+            found[candidate.id] = candidate
+
+    unique_names: list[str] = []
+    seen_names: set[str] = set()
     for name in names:
+        key = name.casefold().strip()
+        if not key or key in seen_names:
+            continue
+        seen_names.add(key)
+        unique_names.append(name.strip())
+    # Keep automatic lookups bounded; the first names are deliberately ordered
+    # by _douban_for_release from the most specific to the broadest fallback.
+    for name in unique_names[:8]:
         if not name:
             continue
         for query in _name_variants(name):
@@ -269,21 +389,52 @@ def _douban_candidates(names: list[str], year: str | None) -> list[DoubanMatch]:
                 item_year = str(item.get("year") or "")
                 title = str(item.get("title") or "")
                 original = str(item.get("sub_title") or "")
+                season = _season_number(" ".join(value for value in (title, original) if value))
                 score = _match_score(query, [title, original], year, item_year)
-                candidate = DoubanMatch(
-                    id=item_id,
-                    url=f"https://movie.douban.com/subject/{item_id}/" if item_id else str(item.get("url") or ""),
-                    title=title,
-                    original_title=original,
-                    year=item_year,
-                    score=score,
+                add(
+                    DoubanMatch(
+                        id=item_id,
+                        url=f"https://movie.douban.com/subject/{item_id}/" if item_id else str(item.get("url") or ""),
+                        title=title,
+                        original_title=original,
+                        year=item_year,
+                        score=score,
+                        season_number=season,
+                    )
                 )
-                if item_id and (item_id not in found or score > found[item_id].score):
-                    found[item_id] = candidate
+
+    if expected_season is not None:
+        # The suggest endpoint frequently returns only the newest season.  The
+        # regular HTML search has all season-specific entries, so query it with
+        # an explicit season suffix and merge its results with the suggest API.
+        page_queries: list[str] = []
+        for name in unique_names[:8]:
+            if not name:
+                continue
+            page_queries.append(f"{name} Season {expected_season}")
+            if _contains_cjk(name):
+                page_queries.append(f"{name} 第{expected_season}季")
+        seen_queries: set[str] = set()
+        for query in page_queries[:6]:
+            if query.casefold() in seen_queries:
+                continue
+            seen_queries.add(query.casefold())
+            try:
+                for candidate in _douban_search_page_candidates(query, year):
+                    add(candidate)
+            except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError):
+                continue
     return sorted(found.values(), key=lambda item: item.score, reverse=True)
 
 
-def _choose_douban(candidates: list[DoubanMatch]) -> DoubanMatch | None:
+def _choose_douban(
+    candidates: list[DoubanMatch],
+    expected_season: int | None = None,
+) -> DoubanMatch | None:
+    if expected_season is not None:
+        candidates = [item for item in candidates if item.season_number == expected_season]
+        if not candidates:
+            return None
     if not candidates:
         return None
     top = candidates[0]
@@ -1292,6 +1443,33 @@ def _tmdb_for_release(
         return None
 
 
+def _season_number_from_episode(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.match(r"S(\d{1,2})(?:E|D)", value, re.I)
+    return int(match.group(1)) if match else None
+
+
+def _tmdb_season_for_release(
+    args: argparse.Namespace,
+    tmdb: TmdbMatch | None,
+    season_number: int | None,
+) -> TmdbSeason | None:
+    if args.offline or not tmdb or tmdb.media_type != "tv" or season_number is None:
+        return None
+    client = TmdbClient(
+        read_token=os.environ.get("TMDB_READ_ACCESS_TOKEN", ""),
+        api_key=os.environ.get("TMDB_API_KEY", ""),
+    )
+    if not client.available:
+        return None
+    try:
+        return client.season(tmdb.id, season_number)
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as exc:
+        print(f"警告：TMDB 第 {season_number} 季查询失败，将使用通用季数检索：{exc}")
+        return None
+
+
 def _douban_for_release(
     args: argparse.Namespace,
     *,
@@ -1299,17 +1477,46 @@ def _douban_for_release(
     title: str,
     base_title: str,
     year: str | None,
+    season_number: int | None = None,
 ) -> DoubanMatch | None:
     douban = _manual_douban(args.douban_url) if args.douban_url else None
     if not douban and not args.offline:
+        season = _tmdb_season_for_release(args, tmdb, season_number)
+        search_year = (season.year if season and season.year else year)
         search_names = [
-            tmdb.chinese_name if tmdb else "",
-            tmdb.name if tmdb else "",
             tmdb.original_name if tmdb else "",
+            tmdb.name if tmdb else "",
             title,
+            tmdb.chinese_name if tmdb else "",
             base_title,
         ]
-        douban = _choose_douban(_douban_candidates(search_names, year))
+        if season_number is not None:
+            # Prefer the TMDB season's subtitle (e.g. ``Pearl Islands``),
+            # while retaining generic ``Season N``/``第N季`` fallbacks.
+            season_names: list[str] = []
+            for name in search_names:
+                if not name:
+                    continue
+                if season and season.name:
+                    season_names.append(f"{name} {season.name}")
+                season_names.append(f"{name} Season {season_number}")
+                if _contains_cjk(name):
+                    season_names.append(f"{name} 第{season_number}季")
+            search_names = season_names + search_names
+        deduplicated_names: list[str] = []
+        seen_names: set[str] = set()
+        for name in search_names:
+            key = name.casefold().strip()
+            if key and key not in seen_names:
+                seen_names.add(key)
+                deduplicated_names.append(name.strip())
+        search_names = deduplicated_names
+        douban = _choose_douban(
+            _douban_candidates(search_names, search_year, expected_season=season_number),
+            expected_season=season_number,
+        )
+        if season_number is not None and not douban:
+            print(f"提示：未找到与第 {season_number} 季精确匹配的豆瓣条目，已留空以避免误填其他季。")
     if not douban and not args.offline and sys.stdin.isatty():
         try:
             manual = input("未自动找到可靠豆瓣条目，可粘贴豆瓣链接或直接回车跳过：").strip()
@@ -1567,7 +1774,20 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         platform=representative.platform,
         include_audio_count=args.audio_count,
     )
-    douban = _douban_for_release(args, tmdb=tmdb, title=title, base_title=base_title, year=year)
+    douban_seasons = {
+        season_number
+        for plan in provisional
+        if (season_number := _season_number_from_episode(plan.episode)) is not None
+    }
+    douban_season_number = next(iter(douban_seasons)) if len(douban_seasons) == 1 else None
+    douban = _douban_for_release(
+        args,
+        tmdb=tmdb,
+        title=title,
+        base_title=base_title,
+        year=year,
+        season_number=douban_season_number,
+    )
     language_code = (tmdb.original_language if tmdb else "") or representative.media.audio_language
     subtitle = build_subtitle(
         douban=douban,
@@ -1795,20 +2015,14 @@ def main(argv: list[str] | None = None) -> Path | None:
         if args.apply and target.exists() and target != path:
             raise FileExistsError(f"目标文件已存在：{target}")
 
-        douban: DoubanMatch | None = _manual_douban(args.douban_url) if args.douban_url else None
-        if not douban and not args.offline:
-            search_names = [
-                tmdb.chinese_name if tmdb else "",
-                tmdb.name if tmdb else "",
-                tmdb.original_name if tmdb else "",
-                title,
-                base_title,
-            ]
-            douban = _choose_douban(_douban_candidates(search_names, year))
-        if not douban and sys.stdin.isatty():
-            manual = input("未自动找到可靠豆瓣条目，可粘贴豆瓣链接或直接回车跳过：").strip()
-            if manual:
-                douban = _manual_douban(manual)
+        douban = _douban_for_release(
+            args,
+            tmdb=tmdb,
+            title=title,
+            base_title=base_title,
+            year=year,
+            season_number=_season_number_from_episode(episode),
+        )
 
         language_code = (tmdb.original_language if tmdb else "") or media.audio_language
         subtitle = build_subtitle(
