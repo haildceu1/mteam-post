@@ -392,7 +392,7 @@ media-title-rename subtitle-upload --torrent-id 123456 `
   --submit
 ```
 
-字幕功能默认沿用 `publish` 的 Chrome 登录目录：优先读取环境变量 `MTEAM_PROFILE_DIR`，其次使用本机已有的 `D:\Cinema\mteam`，最后使用 `%LOCALAPPDATA%\mteam-post\chrome-profile`。也可以用 `--profile-dir` 或 `--cookie-file` 临时覆盖。
+字幕功能默认沿用 `publish` 的 Chrome 登录目录：优先读取环境变量 `MTEAM_PROFILE_DIR`；Windows 其次复用已有的 `D:\Cinema\mteam`，否则使用 `%LOCALAPPDATA%\mteam-post\chrome-profile`；Ubuntu 使用 `${XDG_CONFIG_HOME:-$HOME/.config}/mteam-post/chrome-profile`。也可以用 `--profile-dir` 或 `--cookie-file` 临时覆盖。
 
 如果之前已经完成 `prepare`，可直接把资料包 JSON 或整个 `.prepare` 目录交给 `publish`。此模式不需要 `--apply`，并会跳过 MediaInfo/BDInfo、TMDB/豆瓣查询、截图生成、种子哈希和改名：
 
