@@ -863,9 +863,23 @@ def main() -> None:
 
         publish_main(sys.argv[2:])
         return
+    if len(sys.argv) > 1 and sys.argv[1].lower() in {"subtitle-upload", "mteam-subtitle"}:
+        from .subtitle import subtitle_main
+
+        subtitle_main(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "subtitle-generate":
+        from .subtitle import generate_main
+
+        generate_main(sys.argv[2:])
+        return
 
     parser = argparse.ArgumentParser(
-        description="读取 MediaInfo，生成符合 M-Team 影片标题规则的名称；默认只预览，不改文件。"
+        description="读取 MediaInfo，生成符合 M-Team 影片标题规则的名称；默认只预览，不改文件。",
+        epilog=(
+            "子命令：prepare（准备资料）、publish（准备并填发布页）、"
+            "subtitle-generate（生成字幕测试文件）、subtitle-upload（批量填写/上传字幕）。"
+        ),
     )
     parser.add_argument("input", type=Path, help="视频文件，或视频所在目录")
     parser.add_argument("--apply", action="store_true", help="确认执行重命名；未指定时仅预览")

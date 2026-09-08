@@ -1,6 +1,6 @@
 # MTeam Post
 
-本项目把本地媒体识别、MediaInfo、规范重命名、TMDB/豆瓣匹配、V1 私有种子、截图以及 M-Team 发布页填写整合为一个可安装的 Python 包。支持普通视频、整季剧集目录、DVD ISO 和 Blu-ray ISO。程序始终停在最终“发布”按钮之前。
+本项目把本地媒体识别、MediaInfo、规范重命名、TMDB/豆瓣匹配、V1 私有种子、截图、M-Team 发布页填写以及字幕批量上传整合为一个可安装的 Python 包。支持普通视频、整季剧集目录、DVD ISO 和 Blu-ray ISO。种子发布始终停在最终“发布”按钮之前；字幕默认也只填表，只有明确添加 `--submit` 才会实际上传。
 
 ## 在另一台 Windows 电脑复现
 
@@ -226,6 +226,71 @@ media-title-rename publish "F:\TV\20.22" --refresh-prepare --apply
 ```
 
 电影、DVD ISO、蓝光 ISO 也使用相同命令。`prepare` 的参数可以直接继续使用，例如 `--tmdb-id`、`--douban-url`、`--category`、`--screenshots 4`。若只想填写文字字段而不上传文件，添加 `--no-upload`。
+
+## 批量准备和上传字幕
+
+M-Team 的[官方字幕命名规则](https://wiki.m-team.cc/zh-tw/upload-subtitle-rules)要求：字幕主文件名与种子内对应视频的主文件名相同，并在扩展名前加入语言标识；简体中文使用 `.chs`。例如视频为 `Survivor.S07E01.mkv`，对应字幕应为：
+
+```text
+Survivor.S07E01.chs.srt
+```
+
+剧集字幕应先打包成 `zip/rar/7z` 再上传。程序接受单个字幕、多个字幕、已有压缩包或包含这些文件的目录；传入多个裸 `.srt/.ass` 时，会自动打成一个 `.chs.zip`。上传页中的语言统一选择“简体中文”，标题默认使用文件名去掉最后一个扩展名后的结果。
+
+先生成《幸存者》第七季的界面测试文件：
+
+```powershell
+media-title-rename subtitle-generate "D:\Subtitle-Test\Survivor.S07" `
+  --series "Survivor" `
+  --season 7 `
+  --episode-count 15
+```
+
+这会生成 `Survivor.S07E01.chs.srt` 至 `Survivor.S07E15.chs.srt`，以及包含全部15集的 `Survivor.S07.chs.zip`。这些 SRT 是空文件，只能测试选择文件和填表，不能发布；即使添加 `--submit`，程序也会检查 ZIP 内容并拒绝上传空字幕。
+
+手动传入种子 ID，选择测试包并打开字幕页：
+
+```powershell
+media-title-rename subtitle-upload `
+  --torrent-id 123456 `
+  "D:\Subtitle-Test\Survivor.S07\Survivor.S07.chs.zip" `
+  --keep-open
+```
+
+默认完成以下操作后停在最终“提交”按钮之前：
+
+- 填写纯数字种子 ID；
+- 批量增加所需的字幕上传行；
+- 选择每个字幕文件或压缩包；
+- 将每一行的字幕语言设为“简体中文”；
+- 将标题设为对应文件名去掉 `.srt/.ass/.zip/.rar/.7z` 后的名称。
+
+若传入的是一个包含多集裸字幕的目录，程序会按剧集规则先自动打包：
+
+```powershell
+media-title-rename subtitle-upload --torrent-id 123456 "D:\Real-Subtitles" --keep-open
+```
+
+只有字幕内容、时间轴和文件名都已经人工检查，并确认与该种子内的视频文件一一对应后，才使用 `--submit` 实际上传：
+
+```powershell
+media-title-rename subtitle-upload `
+  --torrent-id 123456 `
+  "D:\Real-Subtitles\Survivor.S07.chs.zip" `
+  --submit `
+  --keep-open
+```
+
+实际提交前程序会再次要求确认。使用 `--submit --yes` 可以跳过确认，但仍不会绕过空字幕/空 ZIP 检查。可同时传入多个合规压缩包，页面会自动增加多行并依次上传：
+
+```powershell
+media-title-rename subtitle-upload --torrent-id 123456 `
+  "D:\Subs\Part1.chs.zip" `
+  "D:\Subs\Part2.chs.zip" `
+  --submit
+```
+
+字幕功能默认沿用 `publish` 的 Chrome 登录目录：优先读取环境变量 `MTEAM_PROFILE_DIR`，其次使用本机已有的 `D:\Cinema\mteam`，最后使用 `%LOCALAPPDATA%\mteam-post\chrome-profile`。也可以用 `--profile-dir` 或 `--cookie-file` 临时覆盖。
 
 如果之前已经完成 `prepare`，可直接把资料包 JSON 或整个 `.prepare` 目录交给 `publish`。此模式不需要 `--apply`，并会跳过 MediaInfo/BDInfo、TMDB/豆瓣查询、截图生成、种子哈希和改名：
 
