@@ -1244,6 +1244,21 @@ def _season_folder(episode: str) -> str:
     return f"Season {int(match.group(1)):02d}"
 
 
+def _series_folder_name(title: str, year: str | None, tmdb_id: int | None) -> str:
+    """Return the M-Team TV root-folder name from the site naming template."""
+    component = re.sub(r"[<>:\"/\\|?*]", " ", title or "")
+    component = re.sub(r"\s+", " ", component).strip(" .")
+    if not component:
+        raise ValueError("无法按剧集文件夹规则生成目录名：缺少剧名；请传 --title")
+    clean_year = str(year or "").strip()
+    if not re.fullmatch(r"(?:19|20)\d{2}", clean_year):
+        raise ValueError("无法按剧集文件夹规则生成目录名：缺少四位年份；请传 --year")
+    result = f"{component}-{clean_year}"
+    if tmdb_id:
+        result += f"-[tmdb={int(tmdb_id)}]"
+    return result
+
+
 def _folder_videos(root: Path) -> list[Path]:
     iterator = root.rglob("*")
     return sorted(
@@ -1295,8 +1310,11 @@ def _douban_for_release(
             base_title,
         ]
         douban = _choose_douban(_douban_candidates(search_names, year))
-    if not douban and sys.stdin.isatty():
-        manual = input("未自动找到可靠豆瓣条目，可粘贴豆瓣链接或直接回车跳过：").strip()
+    if not douban and not args.offline and sys.stdin.isatty():
+        try:
+            manual = input("未自动找到可靠豆瓣条目，可粘贴豆瓣链接或直接回车跳过：").strip()
+        except EOFError:
+            manual = ""
         if manual:
             douban = _manual_douban(manual)
     return douban
@@ -1334,9 +1352,20 @@ def _folder_screenshots(
     return sorted(generated)
 
 
-def _apply_folder_renames(plans: list[FolderPlan]) -> None:
+def _same_path(left: Path, right: Path) -> bool:
+    return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
+
+
+def _apply_folder_renames(
+    plans: list[FolderPlan],
+    *,
+    root: Path | None = None,
+    target_root: Path | None = None,
+) -> None:
+    """Move episode files and, last, the TV root folder as one rollback unit."""
     completed: list[tuple[Path, Path]] = []
     created_directories: list[Path] = []
+    root_renamed = False
     try:
         for plan in plans:
             if plan.source_path == plan.target_path:
@@ -1346,8 +1375,17 @@ def _apply_folder_renames(plans: list[FolderPlan]) -> None:
                 created_directories.append(plan.target_path.parent)
             plan.source_path.rename(plan.target_path)
             completed.append((plan.source_path, plan.target_path))
+        if root is not None and target_root is not None and not _same_path(root, target_root):
+            root.rename(target_root)
+            root_renamed = True
     except OSError as exc:
         rollback_errors: list[str] = []
+        if root_renamed and root is not None and target_root is not None:
+            try:
+                if target_root.exists() and not root.exists():
+                    target_root.rename(root)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target_root}: {rollback_exc}")
         for source, target in reversed(completed):
             try:
                 if target.exists() and not source.exists():
@@ -1450,6 +1488,15 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     tmdb = _tmdb_for_release(args, kind="tv", base_title=base_title, year=year)
     title = args.title or (tmdb.name if tmdb and tmdb.name else base_title)
     year = args.year or (tmdb.year if tmdb and tmdb.year else year)
+    tmdb_id = tmdb.id if tmdb else args.tmdb_id
+    series_folder_name = _series_folder_name(title, year, tmdb_id)
+    target_root = root.with_name(series_folder_name)
+    if not _same_path(root, target_root) and target_root.exists():
+        raise FileExistsError(f"目标剧集目录已存在，未执行任何改名：{target_root}")
+    if not _same_path(root, target_root):
+        print(f"剧集目录预览：{root.name} → {target_root.name}")
+    if not tmdb_id:
+        print("提示：未获得 TMDB ID，剧集目录名将省略 [tmdb=...]；可传 --tmdb-id 补全。")
 
     provisional: list[FolderPlan] = []
     for path, hints in probes:
@@ -1537,6 +1584,13 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     )
 
     output_dir = (args.output or root.parent / f"{pack_title}.prepare").resolve()
+    if args.apply:
+        try:
+            output_dir.relative_to(root.resolve())
+        except ValueError:
+            pass
+        else:
+            raise ValueError("重命名剧集根目录时，--output 不能位于输入目录内")
     output_dir.mkdir(parents=True, exist_ok=True)
     if cached_technical:
         technical_info_type, media_text, bdinfo_playlist = cached_technical
@@ -1554,10 +1608,20 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         )
     file_records: list[dict[str, Any]] = []
     for index, plan in enumerate(provisional, start=1):
+        final_prepared_path = (
+            target_root / plan.target_path.relative_to(root)
+            if args.apply
+            else plan.source_path
+        )
+        final_representative_path = (
+            target_root / representative.target_path.relative_to(root)
+            if args.apply
+            else representative.source_path
+        )
         file_records.append(
             {
                 "source_path": str(plan.source_path),
-                "prepared_path": str(plan.target_path if args.apply else plan.source_path),
+                "prepared_path": str(final_prepared_path),
                 "filename": plan.target_path.name,
                 "relative_path": str(plan.logical_path),
                 "episode": plan.episode,
@@ -1569,7 +1633,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
                 "technical_info_type": technical_info_type if index == 1 else "",
                 "technical_info_path": str(media_path) if index == 1 else "",
                 "technical_info_text": media_text if index == 1 else "",
-                "media_inherited_from": str(representative.source_path),
+                "media_inherited_from": str(final_representative_path),
             }
         )
 
@@ -1592,16 +1656,17 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             ((plan.source_path, plan.logical_path) for plan in provisional),
             key=lambda item: str(item[1]).casefold(),
         )
-        piece_length = create_private_v1_folder_torrent(root, torrent_files, torrent_path, root.name)
+        torrent_root_name = target_root.name if args.apply else root.name
+        piece_length = create_private_v1_folder_torrent(root, torrent_files, torrent_path, torrent_root_name)
 
     imdb_url = f"https://www.imdb.com/title/{tmdb.imdb_id}/" if tmdb and tmdb.imdb_id else ""
     payload = {
         "schema_version": 1,
         "created_at": int(time.time()),
         "input_path": str(root),
-        "prepared_path": str(root),
+        "prepared_path": str(target_root if args.apply else root),
         "release_name": pack_title,
-        "filename": root.name,
+        "filename": target_root.name if args.apply else root.name,
         "kind": "tv",
         "episode": season,
         "year": year or "",
@@ -1615,7 +1680,11 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         "imdb_url": imdb_url,
         "source_language": LANGUAGE_NAMES.get(language_code.lower(), language_code),
         "media": asdict(representative.media),
-        "media_probe_path": str(representative.source_path),
+        "media_probe_path": str(
+            target_root / representative.target_path.relative_to(root)
+            if args.apply
+            else representative.source_path
+        ),
         "mediainfo_text": media_text,
         "mediainfo_path": str(media_path),
         "technical_info_type": technical_info_type,
@@ -1645,12 +1714,16 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         marker = "=" if relative_source == relative_target else "→"
         print(f"  {relative_source} {marker} {relative_target}")
     if args.apply:
-        _apply_folder_renames(provisional)
+        _apply_folder_renames(provisional, root=root, target_root=target_root)
 
     print("\nM-Team 整季发布资料已准备完：")
     print(f"  整季标题：{pack_title}")
     rename_status = "已全部改名" if args.apply else "尚未改名"
     print(f"  视频文件：{len(provisional)} 个，{rename_status}")
+    if args.apply and not _same_path(root, target_root):
+        print(f"  剧集目录：{target_root}")
+    elif not _same_path(root, target_root):
+        print(f"  剧集目录预览：{root.name} → {target_root.name}")
     print(f"  副标题：{subtitle or '未识别'}")
     print(f"  分类：{category}")
     print(f"  豆瓣：{douban.url if douban else '未找到，请手工补充'}")
