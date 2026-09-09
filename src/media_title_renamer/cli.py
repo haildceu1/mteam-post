@@ -337,6 +337,43 @@ def _clean_component(value: str) -> str:
     return _clean_spaces(value)
 
 
+_KNOWN_RELEASE_PREFIXES = {
+    "bdshare",
+    "chdbits",
+    "ffansdiy",
+    "hdhome",
+    "hds",
+    "mteam",
+    "ourbits",
+    "pter",
+    "ttg",
+}
+
+
+def _is_release_prefix_label(value: str) -> bool:
+    """Return whether a leading bracket label is a tracker/source prefix.
+
+    Bracketed labels are also valid parts of an official title, so only known
+    release communities or domain-like labels are stripped. This keeps names
+    such as ``[REC]`` intact while handling prefixes like ``[BDshare.org]``.
+    """
+    label = value.strip().casefold()
+    compact = re.sub(r"[^a-z0-9]+", "", label)
+    if compact in _KNOWN_RELEASE_PREFIXES:
+        return True
+    return bool(re.fullmatch(r"(?:[a-z0-9-]+\.)+(?:org|com|net|cc|to|me|tv)", label))
+
+
+def _strip_release_prefix(stem: str) -> str:
+    """Remove one or more recognized leading ``[source]`` labels."""
+    value = stem
+    while True:
+        match = re.match(r"^\s*\[([^\[\]\r\n]{1,80})\]\s*[._-]*", value)
+        if not match or not _is_release_prefix_label(match.group(1)):
+            return value
+        value = value[match.end() :]
+
+
 def _canonical_source(value: str | None) -> str | None:
     if not value:
         return None
@@ -453,7 +490,7 @@ def _normalise_episode(value: str) -> str:
 
 
 def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
-    stem, group = _strip_group(path.stem)
+    stem, group = _strip_group(_strip_release_prefix(path.stem))
     searchable = stem.replace("_", " ").replace(".", " ")
     year_match = re.search(r"\b((?:19|20)\d{2})\b", searchable)
     episode_pattern = r"\bS\d{1,2}(?:[ ._-]*E\d{1,3}(?:[ ._]*(?:(?:-|TO)[ ._]*E?|E)\d{1,3})*)?\b"

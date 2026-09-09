@@ -26,6 +26,7 @@ from .cli import (
     MediaInfo,
     _canonical_source,
     _find_mediainfo,
+    _is_release_prefix_label,
     _resolve_fields,
     _video_codec,
     build_title,
@@ -1626,6 +1627,10 @@ def _bracket_release_group(path: Path) -> str | None:
         candidate = value.strip()
         if re.fullmatch(r"[A-Za-z][A-Za-z0-9._@-]{1,30}", candidate):
             if not re.fullmatch(r"(?:DISC|DISK|SEASON|S|D)\d*", candidate, re.I):
+                if _is_release_prefix_label(candidate) and re.match(
+                    rf"^\s*\[{re.escape(candidate)}\]", path.stem, re.I
+                ):
+                    continue
                 return candidate
     return None
 

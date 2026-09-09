@@ -6,6 +6,7 @@ from media_title_renamer.cli import (
     VIDEO_EXTENSIONS,
     _dvd_disc_label,
     _infer_source,
+    _strip_release_prefix,
     _video_paths,
     build_title,
     filename_hints,
@@ -98,6 +99,17 @@ class MediaTitleRenamerTests(unittest.TestCase):
         self.assertEqual(hints.source, "WEB-DL")
         self.assertEqual(hints.platform, "Netflix")
         self.assertEqual(hints.group, "GRP")
+
+    def test_release_site_prefix_is_removed_without_touching_title(self):
+        path = Path(
+            "[BDshare.org].Super.Inframan.1975.USA.BluRay.1080p.AVC.LPCM.1.0-FFansDIY@至尊宝.iso"
+        )
+        hints = filename_hints(path)
+        self.assertEqual(_strip_release_prefix(path.stem), "Super.Inframan.1975.USA.BluRay.1080p.AVC.LPCM.1.0-FFansDIY@至尊宝")
+        self.assertEqual(hints.title, "Super Inframan")
+        self.assertEqual(hints.year, "1975")
+        self.assertEqual(hints.source, "BluRay")
+        self.assertIsNone(hints.group)
 
     def test_consecutive_multi_episode_notation_is_normalized(self):
         examples = {
