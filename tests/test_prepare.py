@@ -520,6 +520,14 @@ English
             "影剧/综艺/BluRay",
         )
         self.assertEqual(
+            infer_mteam_category(kind="tv", source="WEB-DL", resolution="544p", animation=False),
+            "影剧/综艺/SD",
+        )
+        self.assertEqual(
+            infer_mteam_category(kind="tv", source="WEB-DL", resolution="720p", animation=False),
+            "影剧/综艺/HD",
+        )
+        self.assertEqual(
             infer_mteam_category(kind="tv", source="WEB-DL", resolution="1080p", animation=True),
             "动画",
         )

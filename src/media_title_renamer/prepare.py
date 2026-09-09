@@ -490,7 +490,10 @@ def infer_mteam_category(*, kind: str, source: str, resolution: str, animation: 
     disc_bluray = source in {"BluRay", "UHD BluRay"}
     any_bluray = "BLURAY" in source_upper
     dvd_iso = source in {"DVD", "DVD5", "DVD9"}
-    sd = bool(re.match(r"(?:480|576)[pi]$", resolution, re.I))
+    resolution_match = re.match(r"(\d+)[pi]$", resolution or "", re.I)
+    # M-Team treats sub-720p releases such as 480p/576p/540p/544p as SD.
+    # The Survivor S07 files are 544p and must therefore use the SD category.
+    sd = bool(resolution_match and int(resolution_match.group(1)) < 720)
     if animation:
         return "动画/Bluray" if any_bluray else "动画"
     if kind == "tv":

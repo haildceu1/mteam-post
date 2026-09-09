@@ -451,6 +451,8 @@ media-title-rename mteam-fill --login-only `
 - 影剧/综艺/SD、影剧/综艺/HD、影剧/综艺/BluRay、影剧/综艺/DVDiSo
 - 动画、动画/Bluray
 
+自动分类时，非 DVD/BluRay/Remux 来源按视频高度判断：低于 720p（包括 480p、540p、544p、576p）归入 SD，720p 及以上归入 HD。因此 544p 的《幸存者》第七季会自动选择 `影剧/综艺/SD`；也可以用 `--category` 手工覆盖。
+
 动画类型在配置 TMDB 后可根据 Animation 类型自动识别，也可以使用 `--animation` 或 `--category` 明确指定。
 
 ### ISO 截图
