@@ -334,7 +334,7 @@ media-title-rename publish "F:\TV\20.22" --refresh-prepare --apply
 media-title-rename publish "F:\TV\20.22" --refresh-prepare --reuse-torrent --apply
 ```
 
-电影、DVD ISO、蓝光 ISO 也使用相同命令。`prepare` 的参数可以直接继续使用，例如 `--tmdb-id`、`--douban-url`、`--category`、`--screenshots 4`。若只想填写文字字段而不上传文件，添加 `--no-upload`。
+电影、DVD ISO、蓝光 ISO 也使用相同命令。文件名中的通用发布版本标记（例如 `V1`、`V2`）会自动忽略，不会被误判为 BluRay 原盘的地区/版本标注。`prepare` 的参数可以直接继续使用，例如 `--tmdb-id`、`--douban-url`、`--category`、`--screenshots 4`。若只想填写文字字段而不上传文件，添加 `--no-upload`。
 
 `--refresh-prepare --reuse-torrent` 适合需要修正 TMDB/豆瓣、分类、简介、MediaInfo/BDInfo 或截图，但媒体内容和种子内部文件名没有变化的情况。程序会自动找到原资料包，重新探测并更新 M-Team 字段，同时保留原 `.torrent`；不会重新读取整部视频计算分块哈希。刷新前会比较单文件名或电视剧目录/集文件的逻辑路径，若规范名称发生变化会停止并要求去掉 `--reuse-torrent` 完整重新制种，避免页面标题、实际文件名和种子元数据不一致。电视剧资料包若原来尚未使用 `--apply` 生成目录种子，不能在复用种子的同时改根目录名，也需要完整重新制种。
 

@@ -374,6 +374,11 @@ def _strip_release_prefix(stem: str) -> str:
         value = value[match.end() :]
 
 
+def _is_release_version_marker(value: str) -> bool:
+    """Return whether a token is a generic release revision such as V1."""
+    return bool(re.fullmatch(r"(?:V|VER|VERSION)\s*\d+(?:[._-]\d+)*", value.strip(), re.I))
+
+
 def _canonical_source(value: str | None) -> str | None:
     if not value:
         return None
@@ -521,7 +526,12 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
         next_technical = re.search(technical_pattern, following, re.I)
         if next_technical:
             candidate = _clean_title(following[: next_technical.start()])
-            edition = candidate if candidate and re.search(r"\w", candidate) else None
+            if (
+                candidate
+                and re.search(r"\w", candidate)
+                and not _is_release_version_marker(candidate)
+            ):
+                edition = candidate
 
     try:
         file_size = path.stat().st_size

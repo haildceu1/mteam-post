@@ -122,6 +122,13 @@ class MediaTitleRenamerTests(unittest.TestCase):
                 self.assertEqual(hints.episode, expected)
                 self.assertEqual(hints.group, "NOGRP")
 
+    def test_generic_release_version_is_not_treated_as_bluray_edition(self):
+        hints = filename_hints(
+            Path("超时空辉夜姬！ (2026).V1.1080p.BluRay.Remux.AVC.TrueHD.5.1.2Audio-AnimeF.mkv")
+        )
+        self.assertIsNone(hints.edition)
+        self.assertEqual(hints.source, "BluRay REMUX")
+
     def test_dotted_episode_interlaced_scan_and_by_group(self):
         data = media_json(audio_format="AC-3", audio_profile="", audio_bitrate="384000")
         data["media"]["track"][1].update({"ScanType": "Interlaced", "ScanOrder": "TFF", "FrameRate": "25.000"})
