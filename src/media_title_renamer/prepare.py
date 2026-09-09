@@ -571,10 +571,11 @@ def _console_safe_text(value: str) -> str:
 class TorrentProgress:
     """A bounded, terminal-friendly progress display for local torrent hashing."""
 
-    def __init__(self, total_bytes: int, file_count: int) -> None:
+    def __init__(self, total_bytes: int, file_count: int, initial_bytes: int = 0) -> None:
         self.total_bytes = max(total_bytes, 0)
         self.file_count = max(file_count, 1)
-        self.completed_bytes = 0
+        self.completed_bytes = min(max(initial_bytes, 0), self.total_bytes)
+        self.bytes_this_run = 0
         self.current_file_index = 0
         self.current_file_name = ""
         self.started_at = time.monotonic()
@@ -582,6 +583,7 @@ class TorrentProgress:
         self.last_bucket = -1
         self.interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
         self.line_active = False
+        self.disabled = False
 
     def start_file(self, index: int, path: Path) -> None:
         self.current_file_index = index
@@ -591,37 +593,47 @@ class TorrentProgress:
         self._render(force=self.interactive or index == 1)
 
     def advance(self, size: int) -> None:
-        self.completed_bytes = min(self.total_bytes, self.completed_bytes + max(size, 0))
+        added = min(max(size, 0), self.total_bytes - self.completed_bytes)
+        self.completed_bytes += added
+        self.bytes_this_run += added
         self._render()
 
     def finish(self) -> None:
         self.completed_bytes = self.total_bytes
         if self.interactive or self.last_bucket != 20:
             self._render(force=True)
-        if self.interactive and self.line_active:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
-        elif not self.interactive:
-            print("制种完成。")
+        try:
+            if self.interactive and self.line_active and not self.disabled:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            elif not self.interactive and not self.disabled:
+                print("制种完成。")
+        except (OSError, UnicodeError):
+            self.disabled = True
 
     def interrupt(self) -> None:
-        if self.interactive and self.line_active:
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+        if self.interactive and self.line_active and not self.disabled:
+            try:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            except OSError:
+                self.disabled = True
             self.line_active = False
 
     def _render(self, *, force: bool = False) -> None:
+        if self.disabled:
+            return
         now = time.monotonic()
         total = self.total_bytes
         percentage = 100.0 if total == 0 else self.completed_bytes * 100 / total
         bucket = min(20, int(percentage // 5))
         if not force:
-            if self.interactive and now - self.last_render_at < 0.25 and self.completed_bytes < total:
+            if self.interactive and now - self.last_render_at < 1.0 and self.completed_bytes < total:
                 return
             if not self.interactive and bucket == self.last_bucket and self.completed_bytes < total:
                 return
         elapsed = max(now - self.started_at, 0.001)
-        speed = self.completed_bytes / elapsed
+        speed = self.bytes_this_run / elapsed
         remaining = (total - self.completed_bytes) / speed if speed > 0 else None
         width = 24
         filled = min(width, int(width * percentage / 100))
@@ -641,34 +653,221 @@ class TorrentProgress:
             f"{_format_transfer_size(self.completed_bytes)}/{_format_transfer_size(total)}  "
             f"{_format_transfer_size(speed)}/s  剩余 {_format_remaining_time(remaining)}{file_part}"
         )
-        if self.interactive:
-            sys.stdout.write("\r" + _console_safe_text(line))
-            sys.stdout.flush()
-            self.line_active = True
-        else:
-            print(_console_safe_text(line))
+        try:
+            if self.interactive:
+                sys.stdout.write("\r" + _console_safe_text(line))
+                sys.stdout.flush()
+                self.line_active = True
+            else:
+                print(_console_safe_text(line))
+        except (OSError, UnicodeError):
+            # Progress rendering must never interrupt a multi-hour hash if a
+            # terminal/redirected stdout handle disappears.
+            self.disabled = True
+            return
         self.last_render_at = now
         self.last_bucket = bucket
 
 
+_TORRENT_RESUME_SCHEMA = 1
+_TORRENT_PIECE_HASH_SIZE = hashlib.sha1().digest_size
+
+
+def _resume_paths(output: Path) -> tuple[Path, Path]:
+    return (
+        output.with_suffix(output.suffix + ".resume.json"),
+        output.with_suffix(output.suffix + ".resume.pieces"),
+    )
+
+
+def _atomic_json_write(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _torrent_resume_identity(
+    *,
+    kind: str,
+    total_size: int,
+    piece_length: int,
+    logical_root_name: str,
+    files: list[tuple[Path, Path, int, int]],
+) -> dict[str, Any]:
+    return {
+        "schema": _TORRENT_RESUME_SCHEMA,
+        "kind": kind,
+        "total_size": total_size,
+        "piece_length": piece_length,
+        "logical_root_name": logical_root_name,
+        "files": [
+            {
+                "source_path": str(source.resolve()),
+                "logical_path": list(logical_path.parts),
+                "size": size,
+                "mtime_ns": mtime_ns,
+            }
+            for source, logical_path, size, mtime_ns in files
+        ],
+    }
+
+
+class TorrentHashCheckpoint:
+    """Append-only SHA-1 piece checkpoint used to resume an interrupted hash."""
+
+    def __init__(
+        self,
+        *,
+        metadata_path: Path,
+        pieces_path: Path,
+        total_size: int,
+        piece_length: int,
+        completed_pieces: int,
+    ) -> None:
+        self.metadata_path = metadata_path
+        self.pieces_path = pieces_path
+        self.total_size = total_size
+        self.piece_length = piece_length
+        self.completed_pieces = completed_pieces
+        self._handle = pieces_path.open("ab")
+
+    @property
+    def completed_bytes(self) -> int:
+        return min(self.total_size, self.completed_pieces * self.piece_length)
+
+    @classmethod
+    def open_or_create(
+        cls,
+        output: Path,
+        identity: dict[str, Any],
+    ) -> "TorrentHashCheckpoint":
+        metadata_path, pieces_path = _resume_paths(output)
+        metadata_exists = metadata_path.is_file()
+        pieces_exists = pieces_path.is_file()
+        if metadata_exists or pieces_exists:
+            if not (metadata_exists and pieces_exists):
+                raise RuntimeError(
+                    "检测到不完整的种子续传检查点；请删除以下两个自动生成文件后重新制种："
+                    f"{metadata_path}；{pieces_path}"
+                )
+            try:
+                saved = json.loads(metadata_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise RuntimeError(f"无法读取种子续传检查点：{metadata_path}：{exc}") from exc
+            if saved != identity:
+                raise RuntimeError(
+                    "已有种子续传检查点与当前文件列表、大小或修改时间不一致；"
+                    "为避免制作出错误种子，未继续。请保留原文件不变，"
+                    f"或删除检查点后重新开始：{metadata_path}"
+                )
+            print(f"发现未完成的种子哈希，将从检查点继续：{metadata_path.name}")
+        else:
+            _atomic_json_write(metadata_path, identity)
+            pieces_path.parent.mkdir(parents=True, exist_ok=True)
+            pieces_path.write_bytes(b"")
+
+        pieces_size = pieces_path.stat().st_size
+        valid_size = pieces_size - pieces_size % _TORRENT_PIECE_HASH_SIZE
+        if valid_size != pieces_size:
+            # A process may have stopped midway through a 20-byte hash write.
+            # This is an internal temporary file, so discarding only that
+            # incomplete hash is safe; the corresponding 16 MiB is re-read.
+            with pieces_path.open("r+b") as handle:
+                handle.truncate(valid_size)
+            pieces_size = valid_size
+        completed_pieces = pieces_size // _TORRENT_PIECE_HASH_SIZE
+        maximum_pieces = math.ceil(identity["total_size"] / identity["piece_length"]) if identity["total_size"] else 0
+        if completed_pieces > maximum_pieces:
+            raise RuntimeError(
+                "种子续传检查点的分块数超过当前文件总大小，未继续："
+                f"{pieces_path}"
+            )
+        return cls(
+            metadata_path=metadata_path,
+            pieces_path=pieces_path,
+            total_size=int(identity["total_size"]),
+            piece_length=int(identity["piece_length"]),
+            completed_pieces=completed_pieces,
+        )
+
+    def append_hash(self, payload: bytes) -> None:
+        self._handle.write(hashlib.sha1(payload).digest())
+        self.completed_pieces += 1
+        # Sync about once per GiB for 16 MiB pieces.  Normal exceptions also
+        # close the handle, preserving all hashes written so far.
+        if self.completed_pieces % 64 == 0:
+            self._handle.flush()
+            os.fsync(self._handle.fileno())
+
+    def close(self) -> None:
+        if not self._handle.closed:
+            self._handle.flush()
+            self._handle.close()
+
+    def read_hashes(self) -> bytes:
+        self.close()
+        return self.pieces_path.read_bytes()
+
+    def cleanup(self) -> None:
+        self.close()
+        self.metadata_path.unlink(missing_ok=True)
+        self.pieces_path.unlink(missing_ok=True)
+
+
+def _torrent_file_specs(files: list[tuple[Path, Path]]) -> list[tuple[Path, Path, int, int]]:
+    return [
+        (source, logical_path, source.stat().st_size, source.stat().st_mtime_ns)
+        for source, logical_path in files
+    ]
+
+
 def create_private_v1_torrent(source: Path, output: Path, logical_name: str) -> int:
-    total_size = source.stat().st_size
+    file_specs = _torrent_file_specs([(source, Path(logical_name))])
+    _source, _logical_path, total_size, _mtime_ns = file_specs[0]
     piece_length = automatic_piece_length(total_size)
     piece_count = math.ceil(total_size / piece_length) if total_size else 1
-    pieces = bytearray()
     print(f"正在生成 V1 私有种子：{piece_count} 个分块，每块 {piece_length // 1024} KiB")
-    progress = TorrentProgress(total_size, 1)
+    identity = _torrent_resume_identity(
+        kind="single",
+        total_size=total_size,
+        piece_length=piece_length,
+        logical_root_name=logical_name,
+        files=file_specs,
+    )
+    checkpoint = TorrentHashCheckpoint.open_or_create(output, identity)
+    progress = TorrentProgress(total_size, 1, checkpoint.completed_bytes)
     progress.start_file(1, source)
+    pending = bytearray()
     try:
+        file_offset = checkpoint.completed_bytes
         with source.open("rb") as handle:
-            while True:
-                chunk = handle.read(piece_length)
+            handle.seek(file_offset)
+            while file_offset < total_size:
+                chunk = handle.read(min(piece_length, total_size - file_offset))
                 if not chunk:
-                    break
-                pieces.extend(hashlib.sha1(chunk).digest())
+                    raise RuntimeError(
+                        f"制种读取失败：{source} 在文件内偏移 {file_offset:,}/{total_size:,} 字节提前结束"
+                    )
+                file_offset += len(chunk)
+                pending.extend(chunk)
                 progress.advance(len(chunk))
+                while len(pending) >= piece_length:
+                    checkpoint.append_hash(pending[:piece_length])
+                    del pending[:piece_length]
+        if pending:
+            checkpoint.append_hash(pending)
+        pieces = checkpoint.read_hashes()
+    except OSError as exc:
+        progress.interrupt()
+        checkpoint.close()
+        raise RuntimeError(
+            f"制种读取失败：{source}（文件内偏移 {file_offset:,}/{total_size:,} 字节，"
+            f"全局进度 {progress.completed_bytes:,}/{total_size:,} 字节）：{exc}"
+        ) from exc
     except BaseException:
         progress.interrupt()
+        checkpoint.close()
         raise
     progress.finish()
     info = {
@@ -682,6 +881,7 @@ def create_private_v1_torrent(source: Path, output: Path, logical_name: str) -> 
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_bytes(_bencode({"info": info}))
     temporary.replace(output)
+    checkpoint.cleanup()
     return piece_length
 
 
@@ -699,39 +899,68 @@ def create_private_v1_folder_torrent(
     """
     if not files:
         raise ValueError("文件夹中没有可制种的视频文件")
-    total_size = sum(source.stat().st_size for source, _logical in files)
+    file_specs = _torrent_file_specs(files)
+    total_size = sum(size for _source, _logical, size, _mtime_ns in file_specs)
     piece_length = automatic_piece_length(total_size)
     piece_count = math.ceil(total_size / piece_length) if total_size else 0
     print(f"正在生成 V1 私有目录种子：{piece_count} 个分块，每块 {piece_length // 1024} KiB")
-    pieces = bytearray()
+    identity = _torrent_resume_identity(
+        kind="folder",
+        total_size=total_size,
+        piece_length=piece_length,
+        logical_root_name=logical_root_name,
+        files=file_specs,
+    )
+    checkpoint = TorrentHashCheckpoint.open_or_create(output, identity)
     pending = bytearray()
     file_entries: list[dict[str, Any]] = []
-    progress = TorrentProgress(total_size, len(files))
+    progress = TorrentProgress(total_size, len(file_specs), checkpoint.completed_bytes)
+    remaining_skip = checkpoint.completed_bytes
     try:
-        for index, (source, logical_path) in enumerate(files, start=1):
+        for index, (source, logical_path, file_size, _mtime_ns) in enumerate(file_specs, start=1):
             try:
                 source.resolve().relative_to(root.resolve())
             except ValueError as exc:
                 raise ValueError(f"制种文件不在输入目录内：{source}") from exc
             if logical_path.is_absolute() or ".." in logical_path.parts:
                 raise ValueError(f"种子内部路径不安全：{logical_path}")
-            file_entries.append({"length": source.stat().st_size, "path": list(logical_path.parts)})
+            file_entries.append({"length": file_size, "path": list(logical_path.parts)})
             progress.start_file(index, source)
+            file_offset = min(remaining_skip, file_size)
+            remaining_skip = max(remaining_skip - file_size, 0)
+            if file_offset == file_size:
+                continue
             with source.open("rb") as handle:
-                while True:
-                    chunk = handle.read(1024 * 1024)
+                handle.seek(file_offset)
+                while file_offset < file_size:
+                    chunk = handle.read(min(1024 * 1024, file_size - file_offset))
                     if not chunk:
-                        break
+                        raise RuntimeError(
+                            f"制种读取失败：{source} 在文件内偏移 {file_offset:,}/{file_size:,} 字节提前结束"
+                        )
+                    file_offset += len(chunk)
                     pending.extend(chunk)
                     progress.advance(len(chunk))
                     while len(pending) >= piece_length:
-                        pieces.extend(hashlib.sha1(pending[:piece_length]).digest())
+                        checkpoint.append_hash(pending[:piece_length])
                         del pending[:piece_length]
+        if pending:
+            checkpoint.append_hash(pending)
+        pieces = checkpoint.read_hashes()
+    except OSError as exc:
+        progress.interrupt()
+        checkpoint.close()
+        current_path = source if "source" in locals() else root
+        current_size = file_size if "file_size" in locals() else 0
+        current_offset = file_offset if "file_offset" in locals() else 0
+        raise RuntimeError(
+            f"制种读取失败：{current_path}（文件内偏移 {current_offset:,}/{current_size:,} 字节，"
+            f"全局进度 {progress.completed_bytes:,}/{total_size:,} 字节）：{exc}"
+        ) from exc
     except BaseException:
         progress.interrupt()
+        checkpoint.close()
         raise
-    if pending:
-        pieces.extend(hashlib.sha1(pending).digest())
     progress.finish()
     info = {
         "files": file_entries,
@@ -744,6 +973,7 @@ def create_private_v1_folder_torrent(
     temporary = output.with_suffix(output.suffix + ".tmp")
     temporary.write_bytes(_bencode({"info": info}))
     temporary.replace(output)
+    checkpoint.cleanup()
     return piece_length
 
 

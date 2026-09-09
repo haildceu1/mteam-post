@@ -21,11 +21,15 @@ from media_title_renamer.prepare import (
     _embedded_tmdb_id,
     _media_from_bdinfo,
     _mount_iso,
+    _resume_paths,
     _series_folder_name,
+    _torrent_file_specs,
+    _torrent_resume_identity,
     _unmount_iso,
     DoubanMatch,
     IsoMount,
     TorrentProgress,
+    TorrentHashCheckpoint,
     TmdbMatch,
     TmdbClient,
     _season_number_from_episode,
@@ -522,6 +526,70 @@ English
             self.assertNotIn(b"announce", payload)
             self.assertNotIn(b"6:source", payload)
             self.assertEqual(piece_length, 64 * 1024)
+
+    def test_v1_single_torrent_resumes_from_saved_piece_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "episode.mkv"
+            content = b"a" * (64 * 1024) + b"b" * 17
+            source.write_bytes(content)
+            output = root / "episode.torrent"
+            file_specs = _torrent_file_specs([(source, Path("Episode.mkv"))])
+            identity = _torrent_resume_identity(
+                kind="single",
+                total_size=len(content),
+                piece_length=64 * 1024,
+                logical_root_name="Episode.mkv",
+                files=file_specs,
+            )
+            checkpoint = TorrentHashCheckpoint.open_or_create(output, identity)
+            checkpoint.append_hash(content[: 64 * 1024])
+            checkpoint.close()
+            metadata_path, pieces_path = _resume_paths(output)
+            self.assertTrue(metadata_path.is_file())
+            self.assertTrue(pieces_path.is_file())
+
+            create_private_v1_torrent(source, output, "Episode.mkv")
+
+            payload = output.read_bytes()
+            self.assertIn(hashlib.sha1(content[: 64 * 1024]).digest(), payload)
+            self.assertIn(hashlib.sha1(content[64 * 1024 :]).digest(), payload)
+            self.assertFalse(metadata_path.exists())
+            self.assertFalse(pieces_path.exists())
+
+    def test_v1_folder_torrent_resumes_across_file_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Show"
+            root.mkdir()
+            first = root / "one.mkv"
+            second = root / "two.mkv"
+            first_content = b"a" * (32 * 1024)
+            second_content = b"b" * (80 * 1024)
+            first.write_bytes(first_content)
+            second.write_bytes(second_content)
+            output = Path(directory) / "Show.torrent"
+            files = [(first, Path("Season 01") / "Show S01E01.mkv"), (second, Path("Season 01") / "Show S01E02.mkv")]
+            file_specs = _torrent_file_specs(files)
+            identity = _torrent_resume_identity(
+                kind="folder",
+                total_size=len(first_content) + len(second_content),
+                piece_length=64 * 1024,
+                logical_root_name="Show",
+                files=file_specs,
+            )
+            checkpoint = TorrentHashCheckpoint.open_or_create(output, identity)
+            combined = first_content + second_content
+            checkpoint.append_hash(combined[: 64 * 1024])
+            checkpoint.close()
+
+            create_private_v1_folder_torrent(root, files, output, "Show")
+
+            payload = output.read_bytes()
+            self.assertIn(hashlib.sha1(combined[: 64 * 1024]).digest(), payload)
+            self.assertIn(hashlib.sha1(combined[64 * 1024 :]).digest(), payload)
+            metadata_path, pieces_path = _resume_paths(output)
+            self.assertFalse(metadata_path.exists())
+            self.assertFalse(pieces_path.exists())
 
     def test_mteam_category_mapping(self):
         self.assertEqual(
