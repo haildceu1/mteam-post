@@ -315,7 +315,7 @@ media-title-rename mteam-fill "F:\TV\20.22.prepare\mteam-prepare.json" `
 
 ### 一条命令完成准备和填表
 
-首次登录完成后，可以使用 `publish` 合并资料准备与网页填写。程序会先按 `input_path`/`prepared_path` 自动寻找旁边已经完成的 `.prepare` 资料包：找到就直接复用，不会再次执行 MediaInfo/BDInfo、TMDB/豆瓣查询、截图和种子哈希；找不到时才开始新的 `prepare`，这时必须提供 `--apply`。默认会上传种子及前 4 张截图，仍会在真正写入/上传前询问确认，且绝不会点击最终发布按钮：
+首次登录完成后，可以使用 `publish` 合并资料准备与网页填写。程序会先按 `input_path`/`prepared_path` 自动寻找旁边已经完成的 `.prepare` 资料包：找到就直接复用，不会再次执行 MediaInfo/BDInfo、TMDB/豆瓣查询、截图和种子哈希；找不到时才开始新的 `prepare`，这时必须提供 `--apply`。对于输入为单个文件的情况，如果资料包是在未加 `--apply` 时生成的，随后执行 `publish ... --apply` 会把资料包中的 `filename` 安全应用到本地文件，并同步更新 `prepared_path`；因此本地文件名始终与 M-Team 标题/种子内名称一致。目录资料包仍保持原有的整季/分季改名逻辑。默认会上传种子及前 4 张截图，仍会在真正写入/上传前询问确认，且绝不会点击最终发布按钮：
 
 ```powershell
 # 已有匹配资料包：最简命令，自动复用默认 Chrome 配置
@@ -398,7 +398,7 @@ media-title-rename subtitle-upload --torrent-id 123456 `
 
 字幕功能默认沿用 `publish` 的 Chrome 登录目录：优先读取环境变量 `MTEAM_PROFILE_DIR`；Windows 其次复用已有的 `D:\Cinema\mteam`，否则使用 `%LOCALAPPDATA%\mteam-post\chrome-profile`；Ubuntu 使用 `${XDG_CONFIG_HOME:-$HOME/.config}/mteam-post/chrome-profile`。也可以用 `--profile-dir` 或 `--cookie-file` 临时覆盖。
 
-如果之前已经完成 `prepare`，可直接把资料包 JSON 或整个 `.prepare` 目录交给 `publish`。此模式不需要 `--apply`，并会跳过 MediaInfo/BDInfo、TMDB/豆瓣查询、截图生成、种子哈希和改名：
+如果之前已经完成 `prepare`，可直接把资料包 JSON 或整个 `.prepare` 目录交给 `publish`。此模式不需要 `--apply`，并会跳过 MediaInfo/BDInfo、TMDB/豆瓣查询、截图生成、种子哈希和改名；如果改为传入原始单个文件路径并加 `--apply`，程序会复用资料包并只应用其中记录的规范文件名，不会重新生成资料：
 
 ```powershell
 media-title-rename publish "F:\TV\The Office S01-S09.prepare\mteam-prepare.json" `

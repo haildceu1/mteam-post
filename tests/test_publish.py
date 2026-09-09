@@ -55,6 +55,49 @@ class PublishTests(unittest.TestCase):
 
     @patch("media_title_renamer.publish.mteam_fill_main")
     @patch("media_title_renamer.publish.prepare_main")
+    def test_reused_single_file_package_with_apply_renames_to_release_filename(
+        self, prepare_main, mteam_fill_main
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.mkv"
+            source.write_bytes(b"video")
+            prepare_dir = Path(directory) / "Movie 2024.prepare"
+            prepare_dir.mkdir()
+            package = prepare_dir / "mteam-prepare.json"
+            target_name = "Movie 2024 BluRay 1080p AVC DD5.1-GRP.mkv"
+            package.write_text(
+                json.dumps(
+                    {
+                        "input_path": str(source),
+                        "prepared_path": str(source),
+                        "filename": target_name,
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            publish.main(
+                [
+                    str(source),
+                    "--apply",
+                    "--no-upload",
+                    "--profile-dir",
+                    r"C:\Profiles\mteam",
+                ]
+            )
+
+            target = source.with_name(target_name)
+            self.assertFalse(source.exists())
+            self.assertTrue(target.exists())
+            saved = json.loads(package.read_text(encoding="utf-8"))
+            self.assertEqual(saved["prepared_path"], str(target))
+
+        prepare_main.assert_not_called()
+        self.assertEqual(mteam_fill_main.call_args.args[0][0], str(package.resolve()))
+
+    @patch("media_title_renamer.publish.mteam_fill_main")
+    @patch("media_title_renamer.publish.prepare_main")
     def test_refresh_prepare_ignores_existing_package(self, prepare_main, mteam_fill_main) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "Movie.mkv"
