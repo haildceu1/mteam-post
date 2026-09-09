@@ -25,6 +25,7 @@ from media_title_renamer.prepare import (
     _unmount_iso,
     DoubanMatch,
     IsoMount,
+    TorrentProgress,
     TmdbMatch,
     TmdbClient,
     _season_number_from_episode,
@@ -470,6 +471,22 @@ English
             self.assertNotIn(b"announce", payload)
             self.assertNotIn(b"6:source", payload)
             self.assertEqual(piece_length, 64 * 1024)
+
+    def test_torrent_progress_reports_file_percentage_size_and_eta(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            progress = TorrentProgress(2 * 1024 * 1024, 2)
+            progress.start_file(1, Path("first-episode.mkv"))
+            progress.advance(1024 * 1024)
+            progress.start_file(2, Path("second-episode.mkv"))
+            progress.advance(1024 * 1024)
+            progress.finish()
+        text = output.getvalue()
+        self.assertIn("制种进度", text)
+        self.assertIn("100.0%", text)
+        self.assertIn("2.0 MiB/2.0 MiB", text)
+        self.assertIn("文件 2/2", text)
+        self.assertIn("制种完成。", text)
 
     def test_automatic_piece_size_targets_at_most_2000_pieces(self):
         size = 7 * 1024**3

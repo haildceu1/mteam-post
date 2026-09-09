@@ -538,18 +538,139 @@ def automatic_piece_length(total_size: int) -> int:
     return piece_length
 
 
+def _format_transfer_size(value: float) -> str:
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    amount = max(float(value), 0.0)
+    for unit in units:
+        if amount < 1024 or unit == units[-1]:
+            return f"{amount:.1f} {unit}" if unit != "B" else f"{amount:.0f} {unit}"
+        amount /= 1024
+    return f"{amount:.1f} TiB"
+
+
+def _format_remaining_time(seconds: float | None) -> str:
+    if seconds is None or not math.isfinite(seconds) or seconds < 0:
+        return "--:--"
+    rounded = int(seconds)
+    hours, remainder = divmod(rounded, 3600)
+    minutes, seconds_part = divmod(remainder, 60)
+    return f"{hours:d}:{minutes:02d}:{seconds_part:02d}" if hours else f"{minutes:02d}:{seconds_part:02d}"
+
+
+def _console_safe_text(value: str) -> str:
+    """Avoid a progress line aborting work in legacy Windows code pages."""
+    encoding = getattr(sys.stdout, "encoding", None)
+    if not encoding:
+        return value
+    try:
+        return value.encode(encoding, errors="replace").decode(encoding)
+    except LookupError:
+        return value
+
+
+class TorrentProgress:
+    """A bounded, terminal-friendly progress display for local torrent hashing."""
+
+    def __init__(self, total_bytes: int, file_count: int) -> None:
+        self.total_bytes = max(total_bytes, 0)
+        self.file_count = max(file_count, 1)
+        self.completed_bytes = 0
+        self.current_file_index = 0
+        self.current_file_name = ""
+        self.started_at = time.monotonic()
+        self.last_render_at = 0.0
+        self.last_bucket = -1
+        self.interactive = bool(getattr(sys.stdout, "isatty", lambda: False)())
+        self.line_active = False
+
+    def start_file(self, index: int, path: Path) -> None:
+        self.current_file_index = index
+        self.current_file_name = path.name
+        # In an interactive console this makes a long multi-file hash visibly
+        # move to the next episode without emitting 96 separate log lines.
+        self._render(force=self.interactive or index == 1)
+
+    def advance(self, size: int) -> None:
+        self.completed_bytes = min(self.total_bytes, self.completed_bytes + max(size, 0))
+        self._render()
+
+    def finish(self) -> None:
+        self.completed_bytes = self.total_bytes
+        if self.interactive or self.last_bucket != 20:
+            self._render(force=True)
+        if self.interactive and self.line_active:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        elif not self.interactive:
+            print("制种完成。")
+
+    def interrupt(self) -> None:
+        if self.interactive and self.line_active:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            self.line_active = False
+
+    def _render(self, *, force: bool = False) -> None:
+        now = time.monotonic()
+        total = self.total_bytes
+        percentage = 100.0 if total == 0 else self.completed_bytes * 100 / total
+        bucket = min(20, int(percentage // 5))
+        if not force:
+            if self.interactive and now - self.last_render_at < 0.25 and self.completed_bytes < total:
+                return
+            if not self.interactive and bucket == self.last_bucket and self.completed_bytes < total:
+                return
+        elapsed = max(now - self.started_at, 0.001)
+        speed = self.completed_bytes / elapsed
+        remaining = (total - self.completed_bytes) / speed if speed > 0 else None
+        width = 24
+        filled = min(width, int(width * percentage / 100))
+        # Keep the bar ASCII-only so legacy Windows GBK terminals cannot make
+        # the actual torrent hash fail while merely rendering progress.
+        bar = "#" * filled + "-" * (width - filled)
+        file_name = self.current_file_name
+        if len(file_name) > 46:
+            file_name = file_name[:43] + "..."
+        file_part = (
+            f" | 文件 {self.current_file_index}/{self.file_count}: {file_name}"
+            if self.current_file_index
+            else ""
+        )
+        line = (
+            f"制种进度 [{bar}] {percentage:5.1f}%  "
+            f"{_format_transfer_size(self.completed_bytes)}/{_format_transfer_size(total)}  "
+            f"{_format_transfer_size(speed)}/s  剩余 {_format_remaining_time(remaining)}{file_part}"
+        )
+        if self.interactive:
+            sys.stdout.write("\r" + _console_safe_text(line))
+            sys.stdout.flush()
+            self.line_active = True
+        else:
+            print(_console_safe_text(line))
+        self.last_render_at = now
+        self.last_bucket = bucket
+
+
 def create_private_v1_torrent(source: Path, output: Path, logical_name: str) -> int:
     total_size = source.stat().st_size
     piece_length = automatic_piece_length(total_size)
     piece_count = math.ceil(total_size / piece_length) if total_size else 1
     pieces = bytearray()
     print(f"正在生成 V1 私有种子：{piece_count} 个分块，每块 {piece_length // 1024} KiB")
-    with source.open("rb") as handle:
-        while True:
-            chunk = handle.read(piece_length)
-            if not chunk:
-                break
-            pieces.extend(hashlib.sha1(chunk).digest())
+    progress = TorrentProgress(total_size, 1)
+    progress.start_file(1, source)
+    try:
+        with source.open("rb") as handle:
+            while True:
+                chunk = handle.read(piece_length)
+                if not chunk:
+                    break
+                pieces.extend(hashlib.sha1(chunk).digest())
+                progress.advance(len(chunk))
+    except BaseException:
+        progress.interrupt()
+        raise
+    progress.finish()
     info = {
         "length": total_size,
         "name": logical_name,
@@ -585,25 +706,33 @@ def create_private_v1_folder_torrent(
     pieces = bytearray()
     pending = bytearray()
     file_entries: list[dict[str, Any]] = []
-    for source, logical_path in files:
-        try:
-            source.resolve().relative_to(root.resolve())
-        except ValueError as exc:
-            raise ValueError(f"制种文件不在输入目录内：{source}") from exc
-        if logical_path.is_absolute() or ".." in logical_path.parts:
-            raise ValueError(f"种子内部路径不安全：{logical_path}")
-        file_entries.append({"length": source.stat().st_size, "path": list(logical_path.parts)})
-        with source.open("rb") as handle:
-            while True:
-                chunk = handle.read(1024 * 1024)
-                if not chunk:
-                    break
-                pending.extend(chunk)
-                while len(pending) >= piece_length:
-                    pieces.extend(hashlib.sha1(pending[:piece_length]).digest())
-                    del pending[:piece_length]
+    progress = TorrentProgress(total_size, len(files))
+    try:
+        for index, (source, logical_path) in enumerate(files, start=1):
+            try:
+                source.resolve().relative_to(root.resolve())
+            except ValueError as exc:
+                raise ValueError(f"制种文件不在输入目录内：{source}") from exc
+            if logical_path.is_absolute() or ".." in logical_path.parts:
+                raise ValueError(f"种子内部路径不安全：{logical_path}")
+            file_entries.append({"length": source.stat().st_size, "path": list(logical_path.parts)})
+            progress.start_file(index, source)
+            with source.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    pending.extend(chunk)
+                    progress.advance(len(chunk))
+                    while len(pending) >= piece_length:
+                        pieces.extend(hashlib.sha1(pending[:piece_length]).digest())
+                        del pending[:piece_length]
+    except BaseException:
+        progress.interrupt()
+        raise
     if pending:
         pieces.extend(hashlib.sha1(pending).digest())
+    progress.finish()
     info = {
         "files": file_entries,
         "name": logical_root_name,
