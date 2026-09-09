@@ -50,7 +50,12 @@ def _parser() -> argparse.ArgumentParser:
     reuse.add_argument(
         "--refresh-prepare",
         action="store_true",
-        help="忽略已有资料包，强制重新探测、截图并生成种子（必须同时使用 --apply）",
+        help="忽略已有资料包，强制重新探测、截图并生成种子（通常与 --apply 一起使用）",
+    )
+    parser.add_argument(
+        "--reuse-torrent",
+        action="store_true",
+        help="配合 --refresh-prepare 重新获取发布资料但复用现有种子，不重新哈希",
     )
     parser.add_argument(
         "--profile-dir",
@@ -164,6 +169,142 @@ def _apply_reused_single_file_rename(package_path: Path, input_path: Path) -> bo
     return True
 
 
+def _load_package(package_path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"无法读取 M-Team 资料包：{package_path}：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"M-Team 资料包格式无效：{package_path}")
+    return payload
+
+
+def _package_layout(payload: dict[str, object]) -> tuple[str, tuple[str, ...]]:
+    """Return the names that are part of the torrent's logical layout."""
+    filename = payload.get("filename")
+    if not isinstance(filename, str) or not filename:
+        raise ValueError("资料包缺少 filename，无法安全复用种子")
+    kind = str(payload.get("kind") or "")
+    if kind != "tv":
+        return filename.casefold(), ()
+    records = payload.get("files")
+    if not isinstance(records, list):
+        raise ValueError("电视剧资料包缺少 files，无法安全复用目录种子")
+    relative_paths: list[str] = []
+    for record in records:
+        if not isinstance(record, dict) or not isinstance(record.get("relative_path"), str):
+            raise ValueError("电视剧资料包的 files 记录无效，无法安全复用目录种子")
+        relative_paths.append(Path(str(record["relative_path"])).as_posix().casefold())
+    return filename.casefold(), tuple(sorted(relative_paths))
+
+
+def _package_torrent(payload: dict[str, object], package_path: Path) -> tuple[dict[str, object], Path]:
+    torrent = payload.get("torrent")
+    if not isinstance(torrent, dict):
+        raise ValueError(f"资料包没有 torrent 信息，无法复用种子：{package_path}")
+    torrent_value = torrent.get("path")
+    if not isinstance(torrent_value, str) or not torrent_value.strip():
+        raise FileNotFoundError(f"资料包没有记录现有种子路径：{package_path}")
+    torrent_path = Path(torrent_value)
+    if not torrent_path.is_file():
+        raise FileNotFoundError(f"找不到资料包中的现有种子：{torrent_path}")
+    return torrent, torrent_path
+
+
+def _refresh_with_reused_torrent(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    package_path: Path,
+    prepare_options: list[str],
+) -> Path:
+    """Refresh publication fields while keeping an already hashed torrent.
+
+    The refresh prepare run intentionally omits ``--apply`` and
+    ``--skip-torrent`` is passed to the prepare layer.  This lets us compare
+    the newly calculated logical names with the old package before changing
+    any media path.  A changed logical name would make the old torrent
+    incompatible, so it is rejected instead of producing a misleading form.
+    """
+    if any(option == "--output" or option.startswith("--output=") for option in prepare_options):
+        parser.error("--reuse-torrent 不允许同时指定 --output；资料会更新到现有 .prepare 目录")
+    if "--skip-torrent" in prepare_options:
+        parser.error("--reuse-torrent 已经负责跳过制种，不要重复传 --skip-torrent")
+
+    old_payload = _load_package(package_path)
+    old_torrent, _torrent_path = _package_torrent(old_payload, package_path)
+    old_layout = _package_layout(old_payload)
+    apply_requested = "--apply" in prepare_options
+    old_input = Path(str(old_payload.get("input_path") or ""))
+    old_prepared = Path(str(old_payload.get("prepared_path") or ""))
+    source = args.input.resolve()
+    if old_prepared.is_file() or old_prepared.is_dir():
+        # An already-applied package's canonical path is the safest source
+        # for a refresh.  It also allows callers to pass the former original
+        # path after the file/folder has already been renamed.
+        if _normalised_path(old_prepared) != _normalised_path(old_input):
+            source = old_prepared.resolve()
+    if not source.is_file() and not source.is_dir():
+        raise FileNotFoundError(f"找不到资料包对应的媒体路径：{source}")
+
+    if apply_requested and str(old_payload.get("kind") or "") == "tv":
+        # A folder torrent made by prepare without --apply contains the old
+        # root name.  Renaming that root now would make the reused torrent
+        # invalid; require a full prepare instead.
+        if _normalised_path(old_input) == _normalised_path(old_prepared):
+            parser.error(
+                "现有电视剧种子是在未改名状态下生成的，不能在复用种子时同时改目录名；"
+                "请移除 --reuse-torrent 重新制种"
+            )
+
+    generation_options = [option for option in prepare_options if option != "--apply"]
+    generation_options.extend(["--skip-torrent", "--output", str(package_path.parent)])
+    generated = prepare_main([str(source), *generation_options])
+    if generated is None:
+        raise RuntimeError("刷新发布资料没有返回资料包")
+    generated_path = Path(generated).resolve()
+    if not generated_path.is_file():
+        raise FileNotFoundError(f"刷新发布资料包不存在：{generated_path}")
+    refreshed = _load_package(generated_path)
+    if _package_layout(refreshed) != old_layout:
+        # prepare has not been run with --apply, so media paths are still
+        # untouched. Restore the old package when output was in-place.
+        if generated_path == package_path.resolve():
+            package_path.write_text(
+                json.dumps(old_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        parser.error(
+            "刷新后规范文件名或电视剧目录结构发生变化，不能复用旧种子；"
+            "请移除 --reuse-torrent 后使用 --refresh-prepare --apply 完整重新制种"
+        )
+
+    refreshed["torrent"] = old_torrent
+    # Keep the original input reference so later automatic package lookup
+    # still works even when the package was refreshed from its prepared path.
+    if isinstance(old_payload.get("input_path"), str):
+        refreshed["input_path"] = old_payload["input_path"]
+
+    renamed = False
+    if apply_requested and source.is_file():
+        renamed = _apply_reused_single_file_rename(generated_path, source)
+        if renamed:
+            refreshed = _load_package(generated_path)
+            refreshed["torrent"] = old_torrent
+            if isinstance(old_payload.get("input_path"), str):
+                refreshed["input_path"] = old_payload["input_path"]
+    generated_path.write_text(
+        json.dumps(refreshed, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    print(f"正在刷新 M-Team 发布资料并复用现有种子：{generated_path}")
+    print("已跳过种子哈希；MediaInfo/BDInfo、TMDB/豆瓣、截图和 M-Team 字段已刷新。")
+    if renamed:
+        print("已按刷新后的 M-Team 标题应用单文件改名。")
+    elif apply_requested and source.is_dir():
+        print("电视剧目录与种子逻辑名称未变化，已保持现有规范目录结构。")
+    return generated_path
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run ``prepare`` followed by ``mteam-fill`` with one user command."""
     parser = _parser()
@@ -174,19 +315,33 @@ def main(argv: list[str] | None = None) -> None:
     non_apply_options = [option for option in prepare_options if option != "--apply"]
     if direct_package and args.refresh_prepare:
         parser.error("输入已经是资料包，不能同时使用 --refresh-prepare")
+    if args.reuse_torrent and not args.refresh_prepare:
+        parser.error("--reuse-torrent 必须与 --refresh-prepare 一起使用")
+    if args.reuse_torrent and direct_package:
+        parser.error("--reuse-torrent 需要传入原始媒体文件或剧集目录，不能直接传资料包")
     if args.reuse_prepare and non_apply_options:
         parser.error(
             "要求复用现有资料包时不能再传 prepare 参数：" + " ".join(non_apply_options)
         )
 
-    if package_path is None and not args.refresh_prepare and not non_apply_options:
+    if args.reuse_torrent:
+        try:
+            package_path = _find_existing_package(args.input)
+        except FileNotFoundError as exc:
+            parser.error(str(exc))
+    elif package_path is None and not args.refresh_prepare and not non_apply_options:
         try:
             package_path = _find_existing_package(args.input)
         except FileNotFoundError as exc:
             if args.reuse_prepare:
                 parser.error(str(exc))
 
-    if package_path is not None:
+    if args.reuse_torrent:
+        try:
+            package_path = _refresh_with_reused_torrent(parser, args, package_path, prepare_options)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            parser.error(str(exc))
+    elif package_path is not None:
         unsupported = [option for option in prepare_options if option != "--apply"]
         if unsupported:
             parser.error(

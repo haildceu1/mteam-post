@@ -123,6 +123,71 @@ class PublishTests(unittest.TestCase):
         prepare_main.assert_called_once_with([str(root), "--apply"])
         self.assertEqual(mteam_fill_main.call_args.args[0][0], str(generated))
 
+    @patch("media_title_renamer.publish.mteam_fill_main")
+    @patch("media_title_renamer.publish.prepare_main")
+    def test_refresh_prepare_can_reuse_existing_single_file_torrent(
+        self, prepare_main, mteam_fill_main
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.mkv"
+            source.write_bytes(b"video")
+            prepare_dir = Path(directory) / "Movie 2024.prepare"
+            prepare_dir.mkdir()
+            package = prepare_dir / "mteam-prepare.json"
+            torrent = prepare_dir / "Movie 2024.torrent"
+            torrent.write_bytes(b"existing torrent")
+            target_name = "Movie 2024 BluRay 1080p AVC DD5.1-GRP.mkv"
+            old_torrent = {"path": str(torrent), "format": "v1", "private": True}
+            package.write_text(
+                json.dumps(
+                    {
+                        "input_path": str(source),
+                        "prepared_path": str(source),
+                        "filename": target_name,
+                        "kind": "movie",
+                        "torrent": old_torrent,
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_prepare(argv):
+                self.assertIn("--skip-torrent", argv)
+                self.assertIn("--output", argv)
+                refreshed = {
+                    "input_path": str(source),
+                    "prepared_path": str(source),
+                    "filename": target_name,
+                    "kind": "movie",
+                    "title": "refreshed metadata",
+                    "torrent": {"path": "", "format": "v1", "private": True},
+                }
+                package.write_text(json.dumps(refreshed), encoding="utf-8")
+                return package
+
+            prepare_main.side_effect = fake_prepare
+            publish.main(
+                [
+                    str(source),
+                    "--refresh-prepare",
+                    "--reuse-torrent",
+                    "--apply",
+                    "--no-upload",
+                    "--profile-dir",
+                    r"C:\Profiles\mteam",
+                ]
+            )
+
+            target = source.with_name(target_name)
+            self.assertFalse(source.exists())
+            self.assertTrue(target.exists())
+            saved = json.loads(package.read_text(encoding="utf-8"))
+            self.assertEqual(saved["torrent"], old_torrent)
+            self.assertEqual(saved["prepared_path"], str(target))
+
+        self.assertEqual(mteam_fill_main.call_args.args[0][0], str(package.resolve()))
+
     def test_profile_directory_can_be_configured_by_environment(self) -> None:
         with patch.dict(os.environ, {"MTEAM_PROFILE_DIR": r"E:\Profiles\mteam"}):
             self.assertEqual(

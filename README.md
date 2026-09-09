@@ -329,9 +329,14 @@ media-title-rename publish "D:\永不者-The.Nevers-{tmdb=80828}" --apply
 
 # 即使存在资料包，也强制重新准备
 media-title-rename publish "F:\TV\20.22" --refresh-prepare --apply
+
+# 重新获取 M-Team 填写资料，但复用已完成的种子，不重新哈希视频
+media-title-rename publish "F:\TV\20.22" --refresh-prepare --reuse-torrent --apply
 ```
 
 电影、DVD ISO、蓝光 ISO 也使用相同命令。`prepare` 的参数可以直接继续使用，例如 `--tmdb-id`、`--douban-url`、`--category`、`--screenshots 4`。若只想填写文字字段而不上传文件，添加 `--no-upload`。
+
+`--refresh-prepare --reuse-torrent` 适合需要修正 TMDB/豆瓣、分类、简介、MediaInfo/BDInfo 或截图，但媒体内容和种子内部文件名没有变化的情况。程序会自动找到原资料包，重新探测并更新 M-Team 字段，同时保留原 `.torrent`；不会重新读取整部视频计算分块哈希。刷新前会比较单文件名或电视剧目录/集文件的逻辑路径，若规范名称发生变化会停止并要求去掉 `--reuse-torrent` 完整重新制种，避免页面标题、实际文件名和种子元数据不一致。电视剧资料包若原来尚未使用 `--apply` 生成目录种子，不能在复用种子的同时改根目录名，也需要完整重新制种。
 
 ## 批量准备和上传字幕
 
@@ -414,7 +419,7 @@ media-title-rename publish "F:\TV\The Office S01-S09.prepare"
 media-title-rename publish "F:\TV\The Office"
 ```
 
-兼容参数 `--reuse-prepare` 仍然保留：使用它表示“必须找到现有资料包”，找不到时直接报错而不是重新准备。若媒体内容发生变化，请使用 `--refresh-prepare --apply` 强制重建。
+兼容参数 `--reuse-prepare` 仍然保留：使用它表示“必须找到现有资料包”，找不到时直接报错而不是重新准备。若媒体内容发生变化，请使用 `--refresh-prepare --apply` 强制重建；若只是资料字段需要更新、媒体内容和种子逻辑文件名不变，则使用上面的 `--refresh-prepare --reuse-torrent`，避免重复哈希。
 
 若希望在其他电脑使用自定义默认配置目录，可以在新终端中设置：
 
