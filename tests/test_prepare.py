@@ -30,6 +30,7 @@ from media_title_renamer.prepare import (
     IsoMount,
     TorrentProgress,
     TorrentHashCheckpoint,
+    TorrentPieceHasher,
     TmdbMatch,
     TmdbClient,
     _season_number_from_episode,
@@ -590,6 +591,29 @@ English
             metadata_path, pieces_path = _resume_paths(output)
             self.assertFalse(metadata_path.exists())
             self.assertFalse(pieces_path.exists())
+
+    def test_piece_hasher_streams_across_chunks_without_pending_buffer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "stream.torrent"
+            identity = _torrent_resume_identity(
+                kind="single",
+                total_size=11,
+                piece_length=8,
+                logical_root_name="stream.mkv",
+                files=[],
+            )
+            checkpoint = TorrentHashCheckpoint.open_or_create(output, identity)
+            hasher = TorrentPieceHasher(checkpoint, 8)
+            hasher.update(b"abc")
+            hasher.update(b"defghijk")
+            hasher.finish()
+            hashes = checkpoint.read_hashes()
+            checkpoint.cleanup()
+
+        self.assertEqual(
+            hashes,
+            hashlib.sha1(b"abcdefgh").digest() + hashlib.sha1(b"ijk").digest(),
+        )
 
     def test_mteam_category_mapping(self):
         self.assertEqual(

@@ -793,7 +793,12 @@ class TorrentHashCheckpoint:
         )
 
     def append_hash(self, payload: bytes) -> None:
-        self._handle.write(hashlib.sha1(payload).digest())
+        self.append_digest(hashlib.sha1(payload).digest())
+
+    def append_digest(self, digest: bytes) -> None:
+        if len(digest) != _TORRENT_PIECE_HASH_SIZE:
+            raise ValueError("torrent piece digest must be 20 bytes")
+        self._handle.write(digest)
         self.completed_pieces += 1
         # Sync about once per GiB for 16 MiB pieces.  Normal exceptions also
         # close the handle, preserving all hashes written so far.
@@ -814,6 +819,39 @@ class TorrentHashCheckpoint:
         self.close()
         self.metadata_path.unlink(missing_ok=True)
         self.pieces_path.unlink(missing_ok=True)
+
+
+class TorrentPieceHasher:
+    """Stream bytes into fixed-size SHA-1 pieces with bounded memory."""
+
+    def __init__(self, checkpoint: TorrentHashCheckpoint, piece_length: int) -> None:
+        self.checkpoint = checkpoint
+        self.piece_length = piece_length
+        self._hasher = hashlib.sha1()
+        self._piece_bytes = 0
+
+    def update(self, payload: bytes) -> None:
+        view = memoryview(payload)
+        offset = 0
+        try:
+            while offset < len(view):
+                remaining = self.piece_length - self._piece_bytes
+                take = min(remaining, len(view) - offset)
+                self._hasher.update(view[offset : offset + take])
+                offset += take
+                self._piece_bytes += take
+                if self._piece_bytes == self.piece_length:
+                    self.checkpoint.append_digest(self._hasher.digest())
+                    self._hasher = hashlib.sha1()
+                    self._piece_bytes = 0
+        finally:
+            view.release()
+
+    def finish(self) -> None:
+        if self._piece_bytes:
+            self.checkpoint.append_digest(self._hasher.digest())
+            self._hasher = hashlib.sha1()
+            self._piece_bytes = 0
 
 
 def _torrent_file_specs(files: list[tuple[Path, Path]]) -> list[tuple[Path, Path, int, int]]:
@@ -839,7 +877,7 @@ def create_private_v1_torrent(source: Path, output: Path, logical_name: str) -> 
     checkpoint = TorrentHashCheckpoint.open_or_create(output, identity)
     progress = TorrentProgress(total_size, 1, checkpoint.completed_bytes)
     progress.start_file(1, source)
-    pending = bytearray()
+    piece_hasher = TorrentPieceHasher(checkpoint, piece_length)
     try:
         file_offset = checkpoint.completed_bytes
         with source.open("rb") as handle:
@@ -851,14 +889,17 @@ def create_private_v1_torrent(source: Path, output: Path, logical_name: str) -> 
                         f"制种读取失败：{source} 在文件内偏移 {file_offset:,}/{total_size:,} 字节提前结束"
                     )
                 file_offset += len(chunk)
-                pending.extend(chunk)
+                piece_hasher.update(chunk)
                 progress.advance(len(chunk))
-                while len(pending) >= piece_length:
-                    checkpoint.append_hash(pending[:piece_length])
-                    del pending[:piece_length]
-        if pending:
-            checkpoint.append_hash(pending)
+        piece_hasher.finish()
         pieces = checkpoint.read_hashes()
+    except MemoryError as exc:
+        progress.interrupt()
+        checkpoint.close()
+        raise RuntimeError(
+            f"制种内存不足：{source}（全局进度 {progress.completed_bytes:,}/{total_size:,} 字节）；"
+            "已保存的续传检查点仍可继续"
+        ) from exc
     except OSError as exc:
         progress.interrupt()
         checkpoint.close()
@@ -913,7 +954,7 @@ def create_private_v1_folder_torrent(
         files=file_specs,
     )
     checkpoint = TorrentHashCheckpoint.open_or_create(output, identity)
-    pending = bytearray()
+    piece_hasher = TorrentPieceHasher(checkpoint, piece_length)
     file_entries: list[dict[str, Any]] = []
     progress = TorrentProgress(total_size, len(file_specs), checkpoint.completed_bytes)
     remaining_skip = checkpoint.completed_bytes
@@ -940,14 +981,18 @@ def create_private_v1_folder_torrent(
                             f"制种读取失败：{source} 在文件内偏移 {file_offset:,}/{file_size:,} 字节提前结束"
                         )
                     file_offset += len(chunk)
-                    pending.extend(chunk)
+                    piece_hasher.update(chunk)
                     progress.advance(len(chunk))
-                    while len(pending) >= piece_length:
-                        checkpoint.append_hash(pending[:piece_length])
-                        del pending[:piece_length]
-        if pending:
-            checkpoint.append_hash(pending)
+        piece_hasher.finish()
         pieces = checkpoint.read_hashes()
+    except MemoryError as exc:
+        progress.interrupt()
+        checkpoint.close()
+        current_path = source if "source" in locals() else root
+        raise RuntimeError(
+            f"制种内存不足：{current_path}（全局进度 {progress.completed_bytes:,}/{total_size:,} 字节）；"
+            "已保存的续传检查点仍可继续"
+        ) from exc
     except OSError as exc:
         progress.interrupt()
         checkpoint.close()
