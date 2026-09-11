@@ -22,6 +22,7 @@ from media_title_renamer.prepare import (
     _media_from_bdinfo,
     _mount_iso,
     _resume_paths,
+    _resume_tmdb_id_for_folder,
     _series_folder_name,
     _torrent_file_specs,
     _torrent_resume_identity,
@@ -48,6 +49,33 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_resume_tmdb_id_matches_the_same_folder_file_set(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Show"
+            root.mkdir()
+            first = root / "Show.S01E01.mkv"
+            second = root / "Show.S01E02.mkv"
+            first.write_bytes(b"one")
+            second.write_bytes(b"two")
+            prepare_dir = root.parent / "Show 2024.prepare"
+            prepare_dir.mkdir()
+            checkpoint = prepare_dir / "Show.torrent.resume.json"
+            checkpoint.write_text(
+                json.dumps(
+                    {
+                        "logical_root_name": "Show-2024-[tmdb=1234]",
+                        "files": [
+                            {"source_path": str(first)},
+                            {"source_path": str(second)},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(_resume_tmdb_id_for_folder(root, [first, second]), 1234)
+            self.assertIsNone(_resume_tmdb_id_for_folder(root, [first]))
+
     def test_tmdb_season_returns_localized_and_original_names(self):
         client = TmdbClient(read_token="test-token")
         responses = [

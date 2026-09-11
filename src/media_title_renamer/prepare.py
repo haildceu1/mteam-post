@@ -1721,6 +1721,35 @@ def _embedded_tmdb_id(path: Path) -> int | None:
     return None
 
 
+def _resume_tmdb_id_for_folder(root: Path, source_paths: list[Path]) -> int | None:
+    """Recover a prior TMDB id when a long resume follows a network outage."""
+    wanted = {os.path.normcase(str(path.resolve())) for path in source_paths}
+    if not wanted:
+        return None
+    for candidate in root.parent.glob("*.prepare/*.torrent.resume.json"):
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        entries = payload.get("files") if isinstance(payload, dict) else None
+        if not isinstance(entries, list):
+            continue
+        recorded = {
+            os.path.normcase(str(Path(item["source_path"]).resolve()))
+            for item in entries
+            if isinstance(item, dict) and isinstance(item.get("source_path"), str)
+        }
+        if recorded != wanted:
+            continue
+        logical_root = payload.get("logical_root_name")
+        if not isinstance(logical_root, str):
+            continue
+        match = re.search(r"-\[tmdb=(\d+)\]$", logical_root, re.I)
+        if match:
+            return int(match.group(1))
+    return None
+
+
 def _media_from_bdinfo(text: str, source: str) -> MediaInfo:
     """Extract title fields from a classic BDInfo report for a disc set."""
     video_match = re.search(r"\b(4320|2160|1080|720|576|480)([pi])\b", text, re.I)
@@ -2145,6 +2174,12 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         years = [hints.year for _path, hints in probes if hints.year]
         if years:
             year = max(set(years), key=lambda value: (years.count(value), value))
+    if args.tmdb_id is None:
+        resume_tmdb_id = _resume_tmdb_id_for_folder(root, [path for path, _hints in probes])
+        if resume_tmdb_id is not None:
+            args = argparse.Namespace(**vars(args))
+            args.tmdb_id = resume_tmdb_id
+            print(f"已从现有制种检查点恢复 TMDB ID：{resume_tmdb_id}")
     tmdb = _tmdb_for_release(args, kind="tv", base_title=base_title, year=year)
     title = args.title or (tmdb.name if tmdb and tmdb.name else base_title)
     year = args.year or (tmdb.year if tmdb and tmdb.year else year)
