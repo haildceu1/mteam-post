@@ -415,7 +415,10 @@ English
             root = Path(directory) / "Example Show"
             root.mkdir()
             second = root / "Example.Show.S01E02.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
-            first = root / "Example.Show.S01E01.2024.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
+            # Scene folders sometimes omit the year on the first episode while
+            # later files still carry it; folder preparation should recover it
+            # from the complete episode set.
+            first = root / "Example.Show.S01E01.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
             second.write_bytes(b"episode two")
             first.write_bytes(b"episode one")
             with redirect_stdout(io.StringIO()):
@@ -424,8 +427,6 @@ English
                         str(root),
                         "--title",
                         "Example Show",
-                        "--year",
-                        "2024",
                         "--source",
                         "WEB-DL",
                         "--offline",

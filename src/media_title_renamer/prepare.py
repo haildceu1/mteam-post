@@ -854,6 +854,41 @@ class TorrentPieceHasher:
             self._piece_bytes = 0
 
 
+def _hash_file_from_offset(
+    handle: Any,
+    start_offset: int,
+    file_size: int,
+    piece_hasher: TorrentPieceHasher,
+    progress: TorrentProgress,
+    source: Path,
+) -> int:
+    """Read a file through one reusable buffer and feed the piece hasher.
+
+    ``read`` allocates a new bytes object for every call.  On very long
+    multi-file hashes that can eventually fragment the process address space,
+    even though each individual read is small.  ``readinto`` keeps one buffer
+    alive for the entire file and bounds both the allocation count and memory
+    usage.
+    """
+    file_offset = start_offset
+    read_buffer = bytearray(1024 * 1024)
+    buffer_view = memoryview(read_buffer)
+    try:
+        while file_offset < file_size:
+            request_size = min(len(buffer_view), file_size - file_offset)
+            count = handle.readinto(buffer_view[:request_size])
+            if not count:
+                raise RuntimeError(
+                    f"制种读取失败：{source} 在文件内偏移 {file_offset:,}/{file_size:,} 字节提前结束"
+                )
+            piece_hasher.update(buffer_view[:count])
+            file_offset += count
+            progress.advance(count)
+    finally:
+        buffer_view.release()
+    return file_offset
+
+
 def _torrent_file_specs(files: list[tuple[Path, Path]]) -> list[tuple[Path, Path, int, int]]:
     return [
         (source, logical_path, source.stat().st_size, source.stat().st_mtime_ns)
@@ -882,15 +917,14 @@ def create_private_v1_torrent(source: Path, output: Path, logical_name: str) -> 
         file_offset = checkpoint.completed_bytes
         with source.open("rb") as handle:
             handle.seek(file_offset)
-            while file_offset < total_size:
-                chunk = handle.read(min(piece_length, total_size - file_offset))
-                if not chunk:
-                    raise RuntimeError(
-                        f"制种读取失败：{source} 在文件内偏移 {file_offset:,}/{total_size:,} 字节提前结束"
-                    )
-                file_offset += len(chunk)
-                piece_hasher.update(chunk)
-                progress.advance(len(chunk))
+            file_offset = _hash_file_from_offset(
+                handle,
+                file_offset,
+                total_size,
+                piece_hasher,
+                progress,
+                source,
+            )
         piece_hasher.finish()
         pieces = checkpoint.read_hashes()
     except MemoryError as exc:
@@ -974,15 +1008,14 @@ def create_private_v1_folder_torrent(
                 continue
             with source.open("rb") as handle:
                 handle.seek(file_offset)
-                while file_offset < file_size:
-                    chunk = handle.read(min(1024 * 1024, file_size - file_offset))
-                    if not chunk:
-                        raise RuntimeError(
-                            f"制种读取失败：{source} 在文件内偏移 {file_offset:,}/{file_size:,} 字节提前结束"
-                        )
-                    file_offset += len(chunk)
-                    piece_hasher.update(chunk)
-                    progress.advance(len(chunk))
+                file_offset = _hash_file_from_offset(
+                    handle,
+                    file_offset,
+                    file_size,
+                    piece_hasher,
+                    progress,
+                    source,
+                )
         piece_hasher.finish()
         pieces = checkpoint.read_hashes()
     except MemoryError as exc:
@@ -2104,6 +2137,14 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     base_title, year, common_source, common_group, edition, _episode, common_platform = _resolve_fields(
         shared_args, first_path, first_media
     )
+    if not year:
+        # The first sorted episode often has a scene-style folder name without
+        # a year, while later episodes carry the year token.  Use the most
+        # frequent four-digit year across the complete episode set so a
+        # transient TMDB timeout does not make the folder rename impossible.
+        years = [hints.year for _path, hints in probes if hints.year]
+        if years:
+            year = max(set(years), key=lambda value: (years.count(value), value))
     tmdb = _tmdb_for_release(args, kind="tv", base_title=base_title, year=year)
     title = args.title or (tmdb.name if tmdb and tmdb.name else base_title)
     year = args.year or (tmdb.year if tmdb and tmdb.year else year)
