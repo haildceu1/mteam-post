@@ -474,7 +474,7 @@ JPG 截图会自动识别 HDR10、HDR10+、HLG 和 Dolby Vision，并转换为�
 
 ### 蓝光 ISO 的 BDInfo
 
-Blu-ray/UHD ISO 不再把 ISO 容器的简略 MediaInfo 填入发布页，而是调用 `bdinfo-rs`：先列出播放列表，默认选择时长最长的一项，再完整扫描并保存经典 BDInfo Text。
+Blu-ray/UHD ISO 不再把 ISO 容器的简略 MediaInfo 填入发布页，而是调用 `bdinfo-rs`：先列出播放列表，默认选择时长最长的一项，再完整扫描并保存经典 BDInfo Text。对于文件名未写 `AVC/HEVC/MPEG-2` 等视频编码、MediaInfo 又只返回 General 轨的原盘 ISO，程序会先调用 BDInfo，再用同一份报告生成标题和发布资料，不会凭文件名猜编码或重复扫描。
 
 带有 `4K` 标记的 ISO 会自动使用 `2160p`；文件名中的 `x265` 会作为 HEVC 视频轨信息，但不会把完整 ISO 误判成 BDRip。PowerShell 双引号路径中的 `@` 不需要转义，也不要写成 `\@`。例如：
 

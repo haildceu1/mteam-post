@@ -1262,6 +1262,38 @@ def prepare_technical_info(
     return "BDInfo", bdinfo_text, bdinfo_path, selected
 
 
+def _read_initial_iso_media(
+    args: argparse.Namespace,
+    path: Path,
+) -> tuple[MediaInfo, tuple[str, str] | None]:
+    """Read a Blu-ray ISO through BDInfo when MediaInfo has no video track.
+
+    Some authored Blu-ray images expose only a General track to MediaInfo and
+    their release names do not include a codec token.  Do not guess AVC/HEVC
+    from the filename; use the actual BDInfo report and retain it for the
+    later publication-info step so the disc is scanned only once.
+    """
+    hints = filename_hints(path)
+    source_hint = None if args.source == "auto" else _canonical_source(args.source)
+    source_hint = _canonical_source(source_hint or hints.source) or ""
+    if "BLURAY" not in source_hint.replace(" ", "").upper():
+        raise ValueError("ISO 中未读到视频轨，文件名也缺少分辨率或视频编码")
+
+    if args.bdinfo_report:
+        bdinfo_text = read_bdinfo_report(args.bdinfo_report.resolve())
+        playlist_match = re.search(r"(?:PLAYLIST:|Name:)\s*(\d{5})\.MPLS", bdinfo_text, re.I)
+        selected = playlist_match.group(1) if playlist_match else ""
+    else:
+        with tempfile.TemporaryDirectory(prefix="mteam-post-bdinfo-") as temporary_directory:
+            bdinfo_text, _report_path, selected = generate_bdinfo_report(
+                path,
+                Path(temporary_directory),
+                executable=args.bdinfo_exe,
+                playlist=args.bdinfo_playlist,
+            )
+    return _media_from_bdinfo(bdinfo_text, source_hint), (bdinfo_text, selected)
+
+
 def _extract_screenshots(video: Path, output: Path, count: int) -> list[Path]:
     from random_video_screenshots.cli import extract_screenshots
 
@@ -2459,7 +2491,13 @@ def main(argv: list[str] | None = None) -> Path | None:
             return _prepare_folder(args, path)
         if not path.is_file():
             raise FileNotFoundError(f"找不到媒体文件或文件夹：{path}")
-        initial_media = read_mediainfo(path)
+        precomputed_bdinfo: tuple[str, str] | None = None
+        try:
+            initial_media = read_mediainfo(path)
+        except (RuntimeError, ValueError):
+            if path.suffix.casefold() != ".iso":
+                raise
+            initial_media, precomputed_bdinfo = _read_initial_iso_media(args, path)
         base_title, year, source, group, edition, episode, platform = _resolve_fields(args, path, initial_media)
         kind = args.kind if args.kind != "auto" else ("tv" if episode else "movie")
 
@@ -2530,15 +2568,21 @@ def main(argv: list[str] | None = None) -> Path | None:
         output_dir = (args.output or target.with_suffix(".prepare")).resolve()
         screenshots_dir = output_dir / "screenshots"
         output_dir.mkdir(parents=True, exist_ok=True)
-        technical_info_type, media_text, media_text_path, bdinfo_playlist = prepare_technical_info(
-            path,
-            target.name,
-            source,
-            output_dir,
-            bdinfo_report=args.bdinfo_report,
-            bdinfo_exe=args.bdinfo_exe,
-            bdinfo_playlist=args.bdinfo_playlist,
-        )
+        if precomputed_bdinfo is not None:
+            media_text, bdinfo_playlist = precomputed_bdinfo
+            technical_info_type = "BDInfo"
+            media_text_path = output_dir / "bdinfo.txt"
+            media_text_path.write_text(media_text, encoding="utf-8")
+        else:
+            technical_info_type, media_text, media_text_path, bdinfo_playlist = prepare_technical_info(
+                path,
+                target.name,
+                source,
+                output_dir,
+                bdinfo_report=args.bdinfo_report,
+                bdinfo_exe=args.bdinfo_exe,
+                bdinfo_playlist=args.bdinfo_playlist,
+            )
 
         screenshot_paths: list[Path] = []
         if not args.skip_screenshots:

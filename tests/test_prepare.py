@@ -23,6 +23,7 @@ from media_title_renamer.prepare import (
     _mount_iso,
     _resume_paths,
     _resume_tmdb_id_for_folder,
+    _read_initial_iso_media,
     _series_folder_name,
     _torrent_file_specs,
     _torrent_resume_identity,
@@ -49,6 +50,42 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    @patch("media_title_renamer.prepare.generate_bdinfo_report")
+    def test_unTagged_bluray_iso_uses_bdinfo_before_filename_fallback(self, generate_bdinfo):
+        report = """DISC INFO:
+Disc Title: Fist of Fury
+
+PLAYLIST REPORT:
+Name: 00005.MPLS
+
+VIDEO:
+MPEG-4 AVC Video / 1080p / 23.976 fps
+
+AUDIO:
+DTS-HD Master Audio English / 2.0 / 1500 kbps
+"""
+        generate_bdinfo.return_value = (report, Path("bdinfo.txt"), "00005")
+        args = type(
+            "Args",
+            (),
+            {
+                "source": "auto",
+                "bdinfo_report": None,
+                "bdinfo_exe": None,
+                "bdinfo_playlist": None,
+            },
+        )()
+        with tempfile.TemporaryDirectory() as directory:
+            iso = Path(directory) / ".Fist.of.Fury.1976.2in1.1080p.GBR.Blu-ray.DTS-HD.MA.2.0-AdBlue.iso"
+            iso.write_bytes(b"iso")
+            media, cached = _read_initial_iso_media(args, iso)
+
+        self.assertEqual(media.video_codec, "AVC")
+        self.assertEqual(media.audio_codec, "DTS-HD MA")
+        self.assertEqual(media.audio_channels, "2.0")
+        self.assertEqual(cached[1], "00005")
+        generate_bdinfo.assert_called_once()
+
     def test_resume_tmdb_id_matches_the_same_folder_file_set(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "Show"
