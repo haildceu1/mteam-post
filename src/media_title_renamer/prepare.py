@@ -2227,6 +2227,12 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         print("提示：未获得 TMDB ID，剧集目录名将省略 [tmdb=...]；可传 --tmdb-id 补全。")
 
     provisional: list[FolderPlan] = []
+    country_values = [hints.country for _path, hints in probes if hints.country]
+    common_country = (
+        max(set(country_values), key=lambda value: (country_values.count(value), value))
+        if country_values
+        else None
+    )
     for path, hints in probes:
         source = None if args.source == "auto" else _canonical_source(args.source)
         source = _canonical_source(source or hints.source or common_source) or ""
@@ -2234,7 +2240,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             raise ValueError(f"无法识别来源：{path.name}；请传 --source")
         group = args.group if args.group is not None else (hints.group or common_group)
         platform = args.platform if args.platform is not None else (hints.platform or common_platform)
-        country = hints.country or first_hints.country
+        country = hints.country or common_country
         media = MediaInfo(
             **{
                 **first_media.__dict__,
@@ -2296,7 +2302,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         edition=edition,
         episode=season,
         platform=representative.platform,
-        country=representative.country,
+        country=representative.country or common_country,
         include_audio_count=args.audio_count,
     )
     douban_seasons = {
