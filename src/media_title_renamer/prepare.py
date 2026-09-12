@@ -1648,6 +1648,7 @@ class FolderPlan:
     source: str
     group: str | None
     platform: str | None
+    country: str | None
     media: MediaInfo
 
 
@@ -2233,6 +2234,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             raise ValueError(f"无法识别来源：{path.name}；请传 --source")
         group = args.group if args.group is not None else (hints.group or common_group)
         platform = args.platform if args.platform is not None else (hints.platform or common_platform)
+        country = hints.country or first_hints.country
         media = MediaInfo(
             **{
                 **first_media.__dict__,
@@ -2249,6 +2251,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             edition=edition,
             episode=episode,
             platform=platform,
+            country=country,
             include_audio_count=args.audio_count,
         )
         season_directory = root / _season_folder(episode)
@@ -2263,6 +2266,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
                 source=source,
                 group=group,
                 platform=platform,
+                country=country,
                 media=media,
             )
         )
@@ -2292,6 +2296,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         edition=edition,
         episode=season,
         platform=representative.platform,
+        country=representative.country,
         include_audio_count=args.audio_count,
     )
     douban_seasons = {
@@ -2499,6 +2504,7 @@ def main(argv: list[str] | None = None) -> Path | None:
                 raise
             initial_media, precomputed_bdinfo = _read_initial_iso_media(args, path)
         base_title, year, source, group, edition, episode, platform = _resolve_fields(args, path, initial_media)
+        hints = filename_hints(path, initial_media)
         kind = args.kind if args.kind != "auto" else ("tv" if episode else "movie")
 
         tmdb: TmdbMatch | None = None
@@ -2535,6 +2541,7 @@ def main(argv: list[str] | None = None) -> Path | None:
             edition=edition,
             episode=episode,
             platform=platform,
+            country=hints.country,
             include_audio_count=args.audio_count,
         )
         target = path.with_name(release_title + path.suffix.lower())

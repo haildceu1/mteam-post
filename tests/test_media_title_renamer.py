@@ -212,6 +212,24 @@ class MediaTitleRenamerTests(unittest.TestCase):
             "Sherlock, Jr 1924 MOC BluRay 1080p AVC LPCM2.0-smwy8888",
         )
 
+    def test_country_region_tag_is_kept_in_filename_and_title(self):
+        path = Path("High School Girl's Diary 1981 BluRay 1080p JPN AVC TrueHD 2.0-DIY@BC.iso")
+        media = inspect_media_from_filename(path, source="BluRay")
+        hints = filename_hints(path, media)
+        self.assertEqual(hints.country, "JPN")
+        self.assertEqual(
+            build_title(
+                title=hints.title,
+                year=hints.year,
+                source=hints.source,
+                media=media,
+                group=hints.group,
+                country=hints.country,
+            ),
+            "High School Girl's Diary 1981 BluRay 1080p JPN AVC TrueHD2.0-DIY@BC",
+        )
+        self.assertIsNone(filename_hints(Path("Us.2019.1080p.WEB-DL.AVC.AAC-GRP.mkv")).country)
+
     def test_group_name_may_contain_at_sign(self):
         path = Path(
             "Everything.Everywhere.All.at.Once.2022.ITA.UHD.BluRay.2160p.HEVC.TrueHD.7.1-DiY@HDHome.iso"

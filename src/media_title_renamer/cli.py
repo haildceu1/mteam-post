@@ -112,6 +112,7 @@ class FilenameHints:
     source: str | None
     group: str | None
     platform: str | None
+    country: str | None = None
 
 
 def _normalise_key(key: str) -> str:
@@ -394,6 +395,37 @@ def _detect_platform(stem: str) -> str | None:
     return None
 
 
+# Common three-letter country/region tags used in scene and M-Team release
+# names.  Restricting detection to this allow-list avoids treating arbitrary
+# short words or release-group labels such as DIY as a country marker.
+_COUNTRY_REGION_CODES = {
+    "ARG", "AUS", "AUT", "BEL", "BRA", "CAN", "CHE", "CHL", "CHN", "COL",
+    "CZE", "DEU", "DNK", "ESP", "FIN", "FRA", "GBR", "GER", "GRC", "HKG",
+    "HUN", "IDN", "IND", "IRL", "ISR", "ITA", "JPN", "KOR", "MEX", "MYS",
+    "NLD", "NOR", "NZL", "PHL", "POL", "PRT", "RUS", "SGP", "SWE", "THA",
+    "TUR", "TWN", "UKR", "USA", "VNM", "ZAF", "JP", "KR", "UK", "US", "HK",
+    "TW",
+}
+
+
+def _detect_country_region(stem: str) -> str | None:
+    for match in re.finditer(r"(?<![A-Za-z])([A-Za-z]{2,3})(?![A-Za-z])", stem):
+        candidate = match.group(1).upper()
+        if candidate in _COUNTRY_REGION_CODES:
+            # Two-letter codes are ambiguous with ordinary title words (for
+            # example the film ``Us``).  Accept them only after a release
+            # anchor; unambiguous three-letter scene codes are accepted
+            # anywhere outside the stripped release-group suffix.
+            if len(candidate) == 2 and not re.search(
+                r"(?:19|20)\d{2}|(?:4320|2160|1440|1080|720|576|480)[pi]?|4K|BLU[ .-]?RAY|WEB[ .-]?DL|HDTV",
+                stem[: match.start()],
+                re.I,
+            ):
+                continue
+            return candidate
+    return None
+
+
 def _dvd_disc_label(file_size: int | None) -> str | None:
     if not file_size:
         return None
@@ -546,6 +578,7 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
         source=_infer_source(stem, path.suffix, media, file_size),
         group=group,
         platform=_detect_platform(stem),
+        country=_detect_country_region(stem),
     )
 
 
@@ -660,6 +693,7 @@ def build_title(
     edition: str | None = None,
     episode: str | None = None,
     platform: str | None = None,
+    country: str | None = None,
     include_audio_count: bool = False,
 ) -> str:
     """Build one conservative M-Team-style movie or television title."""
@@ -692,9 +726,14 @@ def build_title(
     # user's BluRay 1080p example), while its TV examples use the opposite
     # order after the episode field.
     if episode:
-        parts.extend([media.resolution, source_part])
+        parts.append(media.resolution)
+        if country:
+            parts.append(_clean_component(country).upper())
+        parts.append(source_part)
     else:
         parts.extend([source_part, media.resolution])
+        if country:
+            parts.append(_clean_component(country).upper())
     if media.hfr:
         parts.append(media.hfr)
     parts.extend(media.hdr)
@@ -869,6 +908,7 @@ def _title_for_path(args: argparse.Namespace, path: Path) -> tuple[MediaInfo, Fi
         edition=edition,
         episode=episode,
         platform=platform,
+        country=hints.country,
         include_audio_count=args.audio_count,
     )
     return media, hints, title_text
