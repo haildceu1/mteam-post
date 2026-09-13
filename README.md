@@ -46,20 +46,29 @@ bdinfo-rs --version
 
 ### 2. 下载并安装本项目
 
+推荐直接从 GitHub 安装发布包，不需要先克隆仓库：
+
 ```powershell
-git clone https://github.com/haildceu1/mteam-post.git
-cd mteam-post
 py -m venv .venv
 Set-ExecutionPolicy -Scope Process Bypass
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install --upgrade `
+  "git+https://github.com/haildceu1/mteam-post.git"
 ```
 
 验证安装：
 
 ```powershell
 media-title-rename --help
+```
+
+如果需要运行项目测试或修改源码，再使用源码安装：
+
+```powershell
+git clone https://github.com/haildceu1/mteam-post.git
+cd mteam-post
+python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
@@ -110,9 +119,13 @@ media-title-rename publish "F:\TV\20.22" `
 升级项目时执行：
 
 ```powershell
-git pull
-python -m pip install -e .
+python -m pip install --upgrade `
+  "git+https://github.com/haildceu1/mteam-post.git"
 ```
+
+如果使用的是源码目录，则执行 `git pull` 后再运行 `python -m pip install -e .` 也可以。
+Python 包安装只负责 `media-title-rename` 等命令及 Python 依赖；MediaInfo、FFmpeg、Chrome、
+`bdinfo-rs` 等系统依赖仍需按上一节安装。
 
 ## 在 Ubuntu 22.04 电脑复现
 
@@ -163,19 +176,28 @@ bdinfo-rs --version
 
 ### 2. 下载并安装本项目
 
+推荐直接从 GitHub 安装发布包，不需要先克隆仓库：
+
 ```bash
-git clone https://github.com/haildceu1/mteam-post.git
-cd mteam-post
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install --upgrade \
+  "git+https://github.com/haildceu1/mteam-post.git"
 ```
 
-验证安装和 Linux 回归测试：
+验证安装：
 
 ```bash
 media-title-rename --help
+```
+
+如果需要运行 Linux 回归测试或修改源码，再使用源码安装：
+
+```bash
+git clone https://github.com/haildceu1/mteam-post.git
+cd mteam-post
+python -m pip install -e .
 python -m unittest discover -s tests -v
 ```
 
@@ -212,9 +234,13 @@ Ubuntu 下 `publish` 的默认 Chrome 配置目录为 `${XDG_CONFIG_HOME:-$HOME/
 升级项目时执行：
 
 ```bash
-git pull
-python -m pip install -e .
+python -m pip install --upgrade \
+  "git+https://github.com/haildceu1/mteam-post.git"
 ```
+
+如果使用的是源码目录，则执行 `git pull` 后再运行 `python -m pip install -e .` 也可以。
+Python 包安装只负责 `media-title-rename` 等命令及 Python 依赖；MediaInfo、FFmpeg、Chrome、
+`bdinfo-rs` 等系统依赖仍需单独安装。
 
 ## M-Team 标题重命名
 
