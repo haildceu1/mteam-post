@@ -439,6 +439,18 @@ def _choose_douban(
     if not candidates:
         return None
     top = candidates[0]
+    if len(candidates) == 1:
+        # A single season-filtered candidate is common for TV releases.  Keep
+        # the same 75-point floor used by non-interactive runs, while avoiding
+        # an unnecessary prompt for an otherwise reasonable exact match.
+        if top.score >= 75:
+            return top
+        if not sys.stdin.isatty():
+            return None
+        print("\n豆瓣只找到一个匹配度较低的候选：")
+        print(f"  1. {top.title} / {top.original_title} ({top.year or '未知年份'})，匹配度 {top.score:.0f}")
+        answer = input("直接回车使用此条目；输入 0 后手工提供：").strip()
+        return top if answer in {"", "1"} else None
     ambiguous = len(candidates) > 1 and top.score - candidates[1].score < 8
     if top.score >= 85 and not ambiguous:
         return top

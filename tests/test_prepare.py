@@ -158,6 +158,21 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         right = DoubanMatch("3271362", "https://movie.douban.com/subject/3271362/", "幸存者：珍珠岛 第七季", "Survivor: Pearl Islands Season 7", "2003", 100, 7)
         self.assertIs(_choose_douban([wrong, right], expected_season=7), right)
         self.assertIsNone(_choose_douban([wrong], expected_season=7))
+
+    def test_single_reasonable_douban_candidate_is_accepted_without_prompt(self):
+        candidate = DoubanMatch(
+            "3271362",
+            "https://movie.douban.com/subject/3271362/",
+            "昭雪 第一季",
+            "Rectify",
+            "2013",
+            80,
+            1,
+        )
+        with patch("media_title_renamer.prepare.sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", side_effect=AssertionError("single candidate should not prompt")
+        ):
+            self.assertIs(_choose_douban([candidate], expected_season=1), candidate)
         self.assertEqual(_season_number_from_episode("S07E01-E02"), 7)
         self.assertEqual(_season_number_from_episode("S07D01"), 7)
 
