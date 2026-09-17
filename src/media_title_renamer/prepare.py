@@ -243,9 +243,18 @@ class TmdbClient:
         original_key = "original_name" if media_type == "tv" else "original_title"
         date_key = "first_air_date" if media_type == "tv" else "release_date"
         found: dict[int, tuple[float, dict[str, Any]]] = {}
-        for query in _name_variants(title):
+        queries = _name_variants(title)
+        if media_type == "tv":
+            # A folder/season release often supplies the season air year and
+            # appends ``Season 2`` to the title. TMDB's TV search expects the
+            # series title and first-air year, so strip the season suffix and
+            # do not constrain the API request by the season year.
+            series_title = _strip_season_suffix(title)
+            if series_title and series_title.casefold() not in {item.casefold() for item in queries}:
+                queries.append(series_title)
+        for query in queries:
             params = {"query": query, "language": "zh-CN", "include_adult": "false"}
-            if year:
+            if year and media_type != "tv":
                 params["year"] = year
             data = self._get(f"/search/{endpoint}", **params)
             for item in data.get("results", [])[:10]:
@@ -256,6 +265,16 @@ class TmdbClient:
                     year,
                     item_year,
                 )
+                if media_type == "tv" and year and item_year:
+                    # For TV folders the supplied year is often the season's
+                    # air year, not the series first-air year. Use it as a
+                    # soft ranking signal so e.g. the 2013 US series wins
+                    # over the unrelated 1990 series with the same title.
+                    try:
+                        distance = abs(int(year) - int(item_year))
+                    except ValueError:
+                        distance = 99
+                    score += max(0, 15 - min(distance, 15))
                 item_id = int(item["id"])
                 if item_id not in found or score > found[item_id][0]:
                     found[item_id] = (score, item)
@@ -431,9 +450,14 @@ def _douban_candidates(
 def _choose_douban(
     candidates: list[DoubanMatch],
     expected_season: int | None = None,
+    expected_titles: list[str] | None = None,
 ) -> DoubanMatch | None:
     if expected_season is not None:
         candidates = [item for item in candidates if item.season_number == expected_season]
+        if not candidates:
+            return None
+    if expected_titles and expected_season is not None:
+        candidates = [item for item in candidates if _douban_title_matches(item, expected_titles)]
         if not candidates:
             return None
     if not candidates:
@@ -465,6 +489,42 @@ def _choose_douban(
     if answer.isdigit() and 1 <= int(answer) <= min(5, len(candidates)):
         return candidates[int(answer) - 1]
     return top
+
+
+def _douban_title_matches(candidate: DoubanMatch, expected_titles: list[str]) -> bool:
+    """Reject same-season search noise whose title is not this series."""
+    candidate_titles = (candidate.title, candidate.original_title)
+    for candidate_title in candidate_titles:
+        candidate_key = _normalise_name(_strip_season_suffix(candidate_title))
+        if not candidate_key:
+            continue
+        for expected_title in expected_titles:
+            expected_key = _normalise_name(_strip_season_suffix(expected_title))
+            if not expected_key:
+                continue
+            if candidate_key == expected_key:
+                return True
+            # A Douban season entry often appends a subtitle to the series
+            # name (e.g. "Survivor: Pearl Islands Season 7"). Avoid substring
+            # matches on short/common names, which create unrelated hits.
+            if min(len(candidate_key), len(expected_key)) >= 6 and (
+                candidate_key in expected_key or expected_key in candidate_key
+            ):
+                return True
+            if min(len(candidate_key), len(expected_key)) >= 6:
+                similarity = SequenceMatcher(None, candidate_key, expected_key).ratio()
+                if similarity >= 0.82:
+                    return True
+    return False
+
+
+def _strip_season_suffix(value: str) -> str:
+    return re.sub(
+        r"\s*(?:SEASON\s*\d{1,2}|S\d{1,2}|第\s*[0-9零〇一二两兩三四五六七八九十]+\s*季)\s*$",
+        "",
+        value,
+        flags=re.I,
+    ).strip()
 
 
 def _contains_cjk(value: str) -> bool:
@@ -1124,6 +1184,50 @@ def select_longest_bdinfo_playlist(output: str) -> str:
     return max(candidates)[1]
 
 
+def select_tv_episode_bdinfo_playlist(output: str) -> str:
+    """Prefer the most common episode-length MPLS over disc/season montages."""
+    candidates: list[tuple[int, str]] = []
+    pattern = re.compile(
+        r"^\s*\d+\s+\d+\s+(\d{5})\.MPLS\s+(\d{1,3}):(\d{2}):(\d{2})(?:\.\d+)?",
+        re.I | re.M,
+    )
+    for match in pattern.finditer(output):
+        hours, minutes, seconds = (int(value) for value in match.groups()[1:])
+        duration = hours * 3600 + minutes * 60 + seconds
+        # Exclude trailers/menus and very long multi-episode/season playlists,
+        # while still allowing feature-length TV episodes or specials.
+        if 15 * 60 <= duration <= 120 * 60:
+            candidates.append((duration, match.group(1)))
+    if not candidates:
+        raise RuntimeError(
+            "BDInfo 列表中没有 15–120 分钟的剧集播放列表；"
+            "为避免选中整季合集，请用 --bdinfo-playlist 手工指定单集 MPLS"
+        )
+
+    # Individual episodes on one disc usually cluster around one runtime.
+    # Pick the densest ±2-minute cluster, then its median-duration playlist.
+    clusters: list[list[tuple[int, str]]] = []
+    for candidate in sorted(candidates):
+        matching = next(
+            (cluster for cluster in clusters if candidate[0] - cluster[0][0] <= 120),
+            None,
+        )
+        if matching is None:
+            clusters.append([candidate])
+        else:
+            matching.append(candidate)
+    cluster = max(
+        clusters,
+        key=lambda items: (
+            len(items),
+            -abs(sorted(duration for duration, _name in items)[len(items) // 2] - 45 * 60),
+            -min(duration for duration, _name in items),
+        ),
+    )
+    median_duration = sorted(duration for duration, _name in cluster)[len(cluster) // 2]
+    return min(cluster, key=lambda item: (abs(item[0] - median_duration), item[1]))[1]
+
+
 def _find_bdinfo_cli(explicit: str | None = None) -> str:
     requested = explicit or os.environ.get("BDINFO_PATH", "")
     if requested:
@@ -1198,6 +1302,7 @@ def generate_bdinfo_report(
     *,
     executable: str | None = None,
     playlist: str | None = None,
+    tv_disc_set: bool = False,
 ) -> tuple[str, Path, str]:
     """Generate a BDInfo report for one Blu-ray ISO and return text/path/MPLS."""
     cli = _find_bdinfo_cli(executable)
@@ -1216,9 +1321,15 @@ def generate_bdinfo_report(
         if listing.returncode != 0:
             detail = listing.stderr.strip() or listing.stdout.strip() or f"退出码 {listing.returncode}"
             raise RuntimeError(f"BDInfo 播放列表扫描失败：{detail}")
-        selected = select_longest_bdinfo_playlist(listing.stdout)
+        selected = (
+            select_tv_episode_bdinfo_playlist(listing.stdout)
+            if tv_disc_set
+            else select_longest_bdinfo_playlist(listing.stdout)
+        )
+
     command = _bdinfo_scan_command(cli, kind, disc, output_dir, selected)
-    print(f"正在生成 BDInfo：主播放列表 {selected}.MPLS；完整扫描可能需要较长时间……")
+    playlist_label = "单集播放列表" if tv_disc_set else "主播放列表"
+    print(f"正在生成 BDInfo：{playlist_label} {selected}.MPLS；完整扫描可能需要较长时间……")
     result = subprocess.run(command)
     if result.returncode not in {0, 3}:
         raise RuntimeError(f"BDInfo 扫描失败，退出码 {result.returncode}")
@@ -1246,6 +1357,7 @@ def prepare_technical_info(
     bdinfo_report: Path | None = None,
     bdinfo_exe: str | None = None,
     bdinfo_playlist: str | None = None,
+    tv_disc_set: bool = False,
 ) -> tuple[str, str, Path, str]:
     """Choose MediaInfo for files/DVD and BDInfo for Blu-ray ISO."""
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1270,6 +1382,7 @@ def prepare_technical_info(
         output_dir,
         executable=bdinfo_exe,
         playlist=bdinfo_playlist,
+        tv_disc_set=tv_disc_set,
     )
     return "BDInfo", bdinfo_text, bdinfo_path, selected
 
@@ -1302,6 +1415,11 @@ def _read_initial_iso_media(
                 Path(temporary_directory),
                 executable=args.bdinfo_exe,
                 playlist=args.bdinfo_playlist,
+                tv_disc_set=(
+                    getattr(args, "kind", "auto") == "tv"
+                    or bool(getattr(args, "episode", None))
+                    or bool(filename_hints(path).episode)
+                ),
             )
     return _media_from_bdinfo(bdinfo_text, source_hint), (bdinfo_text, selected)
 
@@ -1704,7 +1822,14 @@ def _season_number(value: str) -> int | None:
     chinese = re.search(r"第\s*([0-9零〇一二两兩三四五六七八九十]+)\s*季", value, re.I)
     if chinese:
         return _number_token(chinese.group(1))
-    western = re.search(r"(?:^|[^A-Z0-9])(?:SEASON\s*|S)0*(\d{1,2})(?!\d)", value, re.I)
+    # Release names commonly write the season separator as ``Season.2``,
+    # ``Season-2`` or ``Season 2``.  Accept punctuation without allowing the
+    # token to become part of a larger word/number.
+    western = re.search(
+        r"(?:^|[^A-Z0-9])(?:SEASON[\s._-]*|S)0*(\d{1,2})(?!\d)",
+        value,
+        re.I,
+    )
     return int(western.group(1)) if western else None
 
 
@@ -1742,6 +1867,20 @@ def _disc_episode(path: Path, root: Path) -> str | None:
     if season is None:
         return None
     return f"S{season:02d}D{disc:02d}"
+
+
+def _clean_disc_marker_from_edition(value: str | None) -> str | None:
+    """Remove a disc number misparsed as a Blu-ray edition."""
+    if not value:
+        return value
+    cleaned = re.sub(
+        r"(?:^|[ ._-])(?:DISC|DISK|D)[ ._-]*0*\d{1,2}(?=$|[ ._-])",
+        " ",
+        value,
+        flags=re.I,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ._-")
+    return cleaned or None
 
 
 def _bracket_release_group(path: Path) -> str | None:
@@ -2033,9 +2172,23 @@ def _douban_for_release(
         douban = _choose_douban(
             _douban_candidates(search_names, search_year, expected_season=season_number),
             expected_season=season_number,
+            expected_titles=[
+                name
+                for name in (
+                    tmdb.original_name if tmdb else "",
+                    tmdb.name if tmdb else "",
+                    tmdb.chinese_name if tmdb else "",
+                    title,
+                    base_title,
+                )
+                if name and season_number is not None
+            ],
         )
         if season_number is not None and not douban:
-            print(f"提示：未找到与第 {season_number} 季精确匹配的豆瓣条目，已留空以避免误填其他季。")
+            print(
+                f"提示：未找到同时匹配当前剧名和第 {season_number} 季的豆瓣条目，"
+                "已跳过不相关结果以避免误填。"
+            )
     if not douban and not args.offline and sys.stdin.isatty():
         try:
             manual = input("未自动找到可靠豆瓣条目，可粘贴豆瓣链接或直接回车跳过：").strip()
@@ -2147,7 +2300,13 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     for path in paths:
         hints = filename_hints(path)
         disc_episode = _disc_episode(path, root)
-        if disc_episode and not hints.episode:
+        # ``filename_hints`` deliberately recognizes a bare ``S01`` as a
+        # season marker.  Disc-set filenames commonly use that marker
+        # together with a disc marker (for example ``Dexter S01 Disc01.iso``),
+        # in which case the disc-aware ``S01D01`` identity must take
+        # precedence.  Otherwise the folder is misclassified as a regular
+        # episode set and Blu-ray ISOs are sent through MediaInfo.
+        if disc_episode:
             hints = replace(
                 hints,
                 episode=disc_episode,
@@ -2189,6 +2348,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
                 bdinfo_report=args.bdinfo_report,
                 bdinfo_exe=args.bdinfo_exe,
                 bdinfo_playlist=args.bdinfo_playlist,
+                tv_disc_set=True,
             )
         first_media = _media_from_bdinfo(technical_text, source_hint)
         cached_technical = (technical_type, technical_text, selected_playlist)
@@ -2219,6 +2379,11 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         years = [hints.year for _path, hints in probes if hints.year]
         if years:
             year = max(set(years), key=lambda value: (years.count(value), value))
+    if disc_collection:
+        # ``DISC-1`` may have been folded into the generic Blu-ray edition
+        # field (for example ``EUR DISC-1``). Keep the region, but represent
+        # the per-disc identity only through the normalized SxxDxx token.
+        edition = _clean_disc_marker_from_edition(edition)
     if args.tmdb_id is None:
         resume_tmdb_id = _resume_tmdb_id_for_folder(root, [path for path, _hints in probes])
         if resume_tmdb_id is not None:
@@ -2368,6 +2533,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             bdinfo_report=args.bdinfo_report,
             bdinfo_exe=args.bdinfo_exe,
             bdinfo_playlist=args.bdinfo_playlist,
+            tv_disc_set=disc_collection,
         )
     file_records: list[dict[str, Any]] = []
     for index, plan in enumerate(provisional, start=1):
@@ -2607,6 +2773,7 @@ def main(argv: list[str] | None = None) -> Path | None:
                 bdinfo_report=args.bdinfo_report,
                 bdinfo_exe=args.bdinfo_exe,
                 bdinfo_playlist=args.bdinfo_playlist,
+                tv_disc_set=(kind == "tv"),
             )
 
         screenshot_paths: list[Path] = []

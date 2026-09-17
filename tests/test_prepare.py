@@ -15,6 +15,7 @@ from media_title_renamer.prepare import (
     _bdinfo_scan_command,
     _bracket_release_group,
     _disc_episode,
+    _clean_disc_marker_from_edition,
     _choose_douban,
     _douban_search_page_candidates,
     _douban_for_release,
@@ -46,6 +47,7 @@ from media_title_renamer.prepare import (
     prepare_technical_info,
     read_bdinfo_report,
     select_longest_bdinfo_playlist,
+    select_tv_episode_bdinfo_playlist,
 )
 
 
@@ -126,6 +128,34 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         self.assertEqual(season.year, "2003")
         self.assertEqual(get.call_count, 2)
 
+    def test_tmdb_tv_search_strips_season_suffix_and_ignores_season_year(self):
+        client = TmdbClient(read_token="test-token")
+        search_result = {
+            "results": [
+                {
+                    "id": 1425,
+                    "name": "纸牌屋",
+                    "original_name": "House of Cards",
+                    "first_air_date": "2013-02-01",
+                }
+            ]
+        }
+        detail_zh = {
+            "name": "纸牌屋",
+            "original_name": "House of Cards",
+            "first_air_date": "2013-02-01",
+            "original_language": "en",
+            "genres": [],
+            "external_ids": {},
+        }
+        detail_en = {"name": "House of Cards", "original_name": "House of Cards", "first_air_date": "2013-02-01"}
+        with patch.object(client, "_get", side_effect=[{}, search_result, detail_zh, detail_en]) as get:
+            matches = client.search("tv", "House of Cards Season 2", "2014")
+        self.assertEqual(matches[0].id, 1425)
+        self.assertEqual(get.call_args_list[0].kwargs.get("year"), None)
+        self.assertEqual(get.call_args_list[1].kwargs.get("year"), None)
+        self.assertEqual(get.call_args_list[1].kwargs["query"], "House of Cards")
+
     def test_douban_html_search_parses_tv_season(self):
         html = (
             '<script>window.__DATA__ = '
@@ -158,6 +188,34 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         right = DoubanMatch("3271362", "https://movie.douban.com/subject/3271362/", "幸存者：珍珠岛 第七季", "Survivor: Pearl Islands Season 7", "2003", 100, 7)
         self.assertIs(_choose_douban([wrong, right], expected_season=7), right)
         self.assertIsNone(_choose_douban([wrong], expected_season=7))
+
+    def test_douban_selection_rejects_unrelated_series_with_same_season(self):
+        unrelated = [
+            DoubanMatch("1", "", "蝙蝠侠：动画版 第一季", "Batman: The Animated Series Season 1", "1992", 61, 1),
+            DoubanMatch("2", "", "101斑点狗 第一季", "101 Dalmatians: The Series Season 1", "1997", 59, 1),
+        ]
+        self.assertIsNone(
+            _choose_douban(unrelated, expected_season=1, expected_titles=["Devilman Crybaby", "恶魔人：哭泣之子"])
+        )
+
+    def test_douban_selection_accepts_chinese_or_original_series_alias(self):
+        right = DoubanMatch(
+            "42",
+            "https://movie.douban.com/subject/42/",
+            "恶魔人：哭泣之子 第一季",
+            "Devilman: Crybaby Season 1",
+            "2018",
+            80,
+            1,
+        )
+        self.assertIs(
+            _choose_douban(
+                [right],
+                expected_season=1,
+                expected_titles=["Devilman Crybaby", "恶魔人：哭泣之子"],
+            ),
+            right,
+        )
 
     def test_single_reasonable_douban_candidate_is_accepted_without_prompt(self):
         candidate = DoubanMatch(
@@ -203,6 +261,7 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         with (
             patch("media_title_renamer.prepare._tmdb_season_for_release", return_value=season),
             patch("media_title_renamer.prepare._douban_candidates", return_value=[candidate]) as search,
+            patch("media_title_renamer.prepare._choose_douban", wraps=_choose_douban) as choose,
         ):
             result = _douban_for_release(
                 args,
@@ -216,6 +275,8 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         names, search_year = search.call_args.args
         self.assertEqual(search_year, "2003")
         self.assertEqual(search.call_args.kwargs["expected_season"], 7)
+        self.assertIn("Survivor", choose.call_args.kwargs["expected_titles"])
+        self.assertIn("幸存者 真人秀", choose.call_args.kwargs["expected_titles"])
         self.assertIn("Survivor Pearl Islands", names)
 
     def test_series_folder_name_follows_mteam_template(self):
@@ -366,6 +427,28 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         self.assertEqual(_disc_episode(root / "The.Nevers.S01D02.iso", root), "S01D02")
         self.assertEqual(_bracket_release_group(first), "TTG")
         self.assertEqual(_embedded_tmdb_id(root), 80828)
+
+    def test_tv_disc_iso_hints_support_punctuated_season_and_disc(self):
+        root = Path(r"F:\TV\纸牌屋")
+        first = root / "House.of.Cards.Season.2.2014.EUR.DISC-1.Blu-ray.1080p.AVC.DTS-HD.MA5.1-LtrAnCery@CHDBits.iso"
+        fourth = root / "House.of.Cards.Season.2.2014.EUR.DISC-4.Blu-ray.1080p.AVC.DTS-HD.MA5.1-LtrAnCery@CHDBits.iso"
+        self.assertEqual(_disc_episode(first, root), "S02D01")
+        self.assertEqual(_disc_episode(fourth, root), "S02D04")
+
+    def test_disc_collection_edition_drops_disc_marker_but_keeps_region(self):
+        self.assertEqual(_clean_disc_marker_from_edition("EUR DISC-1"), "EUR")
+        self.assertEqual(_clean_disc_marker_from_edition("MOC Disk 02"), "MOC")
+        self.assertIsNone(_clean_disc_marker_from_edition("DISC-1"))
+
+    def test_tv_disc_iso_hints_prefer_disc_identity_over_bare_season(self):
+        root = Path(r"E:\M-team\TV\嗜血法医")
+        first = root / "[嗜血法医 第一季 Dexter S01 2006][12集全 DIY简繁双语字幕][HDSky][136.50GB]" / "Dexter S01 Disc01.iso"
+        second = root / "[嗜血法医 第一季 Dexter S01 2006][12集全 DIY简繁双语字幕][HDSky][136.50GB]" / "Dexter S01 Disc02.iso"
+
+        # A bare S01 is recognized by the general filename parser, but the
+        # disc-aware identity is what makes this a Blu-ray disc collection.
+        self.assertEqual(_disc_episode(first, root), "S01D01")
+        self.assertEqual(_disc_episode(second, root), "S01D02")
 
     def test_bdinfo_report_can_supply_disc_set_title_media(self):
         report = """
@@ -756,6 +839,26 @@ English
 3   2      00009.MPLS     00:01:00
 """
         self.assertEqual(select_longest_bdinfo_playlist(listing), "00005")
+
+    def test_tv_bdinfo_prefers_single_episode_playlist_over_disc_collection(self):
+        listing = """
+# Group  Playlist File  Length    Estimated Bytes Measured Bytes
+1   1      00011.MPLS     03:47:12
+2   1      00012.MPLS     00:49:10
+3   1      00013.MPLS     00:50:02
+4   1      00014.MPLS     00:48:44
+5   1      00015.MPLS     00:02:10
+6   1      00016.MPLS     01:39:00
+        """
+        self.assertEqual(select_tv_episode_bdinfo_playlist(listing), "00012")
+
+    def test_tv_bdinfo_allows_feature_length_episode_when_no_montage_candidate(self):
+        listing = """
+# Group  Playlist File  Length    Estimated Bytes Measured Bytes
+1   1      00001.MPLS     03:47:12
+2   1      00002.MPLS     01:35:00
+"""
+        self.assertEqual(select_tv_episode_bdinfo_playlist(listing), "00002")
 
     def test_bdinfo_rs_iso_commands_include_report_destination(self):
         disc = Path(r"D:\Movie\Disc.iso")

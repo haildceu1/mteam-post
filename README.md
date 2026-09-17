@@ -312,7 +312,7 @@ media-title-rename prepare "F:\Videos\Example.ts" `
 
 例如，输入 `D:\幸存者：真人秀  第七季`，并使用 `--title Survivor --year 2000 --tmdb-id 14658 --apply` 后，目录会变为 `D:\Survivor-2000-[tmdb=14658]\Season 07\`；如果未能取得 TMDB ID，则会变为 `D:\Survivor-2000\Season 07\`，程序会在输出中明确提示。
 
-剧集蓝光 ISO 也支持文件夹模式。季数可以写成 `第一季`、`第1季`、`Season 1` 或 `S01`；碟号可以写成 `第1碟`、`第1盘`、`Disc 1`、`Disk 1` 或 `D01`。例如 `[永不者第一季.The.Nevers.2021][第1碟][TTG].iso` 会规范为含 `S01D01` 的文件名并移入 `Season 01`，第 2 碟相应为 `S01D02`。程序只对第一张光盘运行一次 BDInfo 并从第一张光盘生成 4 张截图，其余光盘复用技术参数；所有光盘仍会一起写入同一个 V1 私有多文件种子。大于 DVD9 容量且没有写 `BluRay` 的 ISO 会按 Blu-ray 原盘识别，目录名中的 `{tmdb=80828}`、`[tmdb=80828]` 也会自动作为 TMDB ID。若容量信息或命名不足以判断来源，可显式添加 `--source BluRay` 或 `--source "UHD BluRay"`。
+剧集蓝光 ISO 也支持文件夹模式。季数可以写成 `第一季`、`第1季`、`Season 1` 或 `S01`；碟号可以写成 `第1碟`、`第1盘`、`Disc 1`、`Disk 1` 或 `D01`。季号和碟号可以出现在同一文件名中，例如 `Dexter S01 Disc01.iso`，也可以分别出现在父目录和文件名中。程序会优先组合为 `S01D01`，不会把文件名中的单独 `S01` 错当成普通整季集号。例如 `[永不者第一季.The.Nevers.2021][第1碟][TTG].iso` 会规范为含 `S01D01` 的文件名并移入 `Season 01`，第 2 碟相应为 `S01D02`。程序只对第一张光盘运行一次 BDInfo 并从第一张光盘生成 4 张截图，其余光盘复用技术参数；剧集 ISO 会优先从 BDInfo 列表中选择常见单集时长的 MPLS，排除整碟/整季合集播放列表。若没有可识别的单集时长候选，会提示通过 `--bdinfo-playlist` 手工指定，避免误扫合集。所有光盘仍会一起写入同一个 V1 私有多文件种子。大于 DVD9 容量且没有写 `BluRay` 的 ISO 会按 Blu-ray 原盘识别，目录名中的 `{tmdb=80828}`、`[tmdb=80828]` 也会自动作为 TMDB ID。若容量信息或命名不足以判断来源，可显式添加 `--source BluRay` 或 `--source "UHD BluRay"`。
 
 ### TMDB 名称增强
 
