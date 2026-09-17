@@ -284,6 +284,18 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
             _series_folder_name("Survivor", "2000", 14658),
             "Survivor-2000-[tmdb=14658]",
         )
+        self.assertEqual(
+            _series_folder_name("Survivor", "2000", 14658, season="S07"),
+            "Survivor-2000-S07-[tmdb=14658]",
+        )
+        self.assertEqual(
+            _series_folder_name("Survivor", "2000", 14658, season="S01-S03"),
+            "Survivor-2000-S01-S03-[tmdb=14658]",
+        )
+        self.assertNotEqual(
+            _series_folder_name("Survivor", "2000", 14658, season="S01"),
+            _series_folder_name("Survivor", "2000", 14658, season="S06"),
+        )
         self.assertEqual(_series_folder_name("幸存者：真人秀", "2000", None), "幸存者：真人秀-2000")
 
     def test_linux_iso_mount_prefers_udisks_for_udf(self):
@@ -514,13 +526,13 @@ English
                         "--douban-url",
                         "https://movie.douban.com/subject/1/",
                         "--skip-screenshots",
-                        "--skip-torrent",
                         "--apply",
                     ]
                 )
             package = json.loads(package_path.read_text(encoding="utf-8"))
-            renamed_root = root.parent / "The Nevers-2021-[tmdb=80828]"
+            renamed_root = root.parent / "The Nevers-2021-S01-[tmdb=80828]"
             prepared_files = sorted(str(path.relative_to(renamed_root)) for path in renamed_root.rglob("*.iso"))
+            torrent_payload = Path(package["torrent"]["path"]).read_bytes()
 
         read_mediainfo.assert_not_called()
         prepare_technical_info_mock.assert_called_once()
@@ -529,8 +541,12 @@ English
         self.assertEqual(package["technical_info_type"], "BDInfo")
         self.assertEqual(package["bdinfo_playlist"], "00001")
         self.assertEqual(package["group"], "TTG")
-        self.assertEqual(package["filename"], "The Nevers-2021-[tmdb=80828]")
+        self.assertEqual(package["filename"], "The Nevers-2021-S01-[tmdb=80828]")
         self.assertEqual(package["prepared_path"], str(renamed_root))
+        self.assertIn(
+            f"4:name{len(renamed_root.name)}:{renamed_root.name}".encode(),
+            torrent_payload,
+        )
         self.assertEqual(
             prepared_files,
             [
@@ -601,7 +617,7 @@ English
                     ]
                 )
             package = json.loads(package_path.read_text(encoding="utf-8"))
-            renamed_root = root.parent / "Example Show-2024"
+            renamed_root = root.parent / "Example Show-2024-S01"
             prepared_files = sorted(
                 str(path.relative_to(renamed_root))
                 for path in renamed_root.rglob("*.mkv")
@@ -612,7 +628,7 @@ English
         self.assertEqual(read_mediainfo_text.call_count, 1)
         self.assertTrue(package["media_probe_path"].endswith("Example Show 2024 S01E01 1080p WEB-DL H.264 DD5.1-GRP.mkv"))
         self.assertEqual(len(package["files"]), 2)
-        self.assertEqual(package["filename"], "Example Show-2024")
+        self.assertEqual(package["filename"], "Example Show-2024-S01")
         self.assertEqual(package["prepared_path"], str(renamed_root))
         self.assertEqual(
             prepared_files,

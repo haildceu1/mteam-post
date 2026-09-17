@@ -2053,8 +2053,22 @@ def _season_folder(episode: str) -> str:
     return f"Season {int(match.group(1)):02d}"
 
 
-def _series_folder_name(title: str, year: str | None, tmdb_id: int | None) -> str:
-    """Return the M-Team TV root-folder name from the site naming template."""
+def _series_folder_name(
+    title: str,
+    year: str | None,
+    tmdb_id: int | None,
+    season: str | None = None,
+) -> str:
+    """Return a season-specific M-Team TV root-folder name.
+
+    A TV root folder is also the root name stored in a directory torrent.  The
+    season therefore has to be part of the folder identity; otherwise S01 and
+    S06 of the same series both resolve to ``Title-year-[tmdb=id]`` and one
+    season is incorrectly treated as an existing target for the other.
+
+    ``season`` is optional for backwards-compatible use of this small helper,
+    but folder preparation always supplies the detected season label.
+    """
     component = re.sub(r"[<>:\"/\\|?*]", " ", title or "")
     component = re.sub(r"\s+", " ", component).strip(" .")
     if not component:
@@ -2063,6 +2077,11 @@ def _series_folder_name(title: str, year: str | None, tmdb_id: int | None) -> st
     if not re.fullmatch(r"(?:19|20)\d{2}", clean_year):
         raise ValueError("无法按剧集文件夹规则生成目录名：缺少四位年份；请传 --year")
     result = f"{component}-{clean_year}"
+    if season:
+        clean_season = str(season).strip().upper()
+        if not re.fullmatch(r"S\d{2}(?:-S\d{2})?", clean_season):
+            raise ValueError(f"无法按剧集文件夹规则生成目录名：季数格式无效：{season}")
+        result += f"-{clean_season}"
     if tmdb_id:
         result += f"-[tmdb={int(tmdb_id)}]"
     return result
@@ -2394,7 +2413,8 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     title = args.title or (tmdb.name if tmdb and tmdb.name else base_title)
     year = args.year or (tmdb.year if tmdb and tmdb.year else year)
     tmdb_id = tmdb.id if tmdb else args.tmdb_id
-    series_folder_name = _series_folder_name(title, year, tmdb_id)
+    season = _season_label([hints.episode or "" for _path, hints in probes])
+    series_folder_name = _series_folder_name(title, year, tmdb_id, season=season)
     target_root = root.with_name(series_folder_name)
     if not _same_path(root, target_root) and target_root.exists():
         raise FileExistsError(f"目标剧集目录已存在，未执行任何改名：{target_root}")
@@ -2469,7 +2489,6 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         raise FileExistsError("目标文件已存在，未执行任何改名：" + "；".join(str(path) for path in conflicts))
 
     representative = provisional[0]
-    season = _season_label([plan.episode for plan in provisional])
     pack_title = build_title(
         title=title,
         year=year,
