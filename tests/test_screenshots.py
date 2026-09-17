@@ -1,7 +1,9 @@
+import subprocess
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
-from random_video_screenshots.cli import _base_command, _filter_option, _is_hdr
+from random_video_screenshots.cli import _base_command, _filter_option, _is_hdr, _probe_video
 
 
 class ScreenshotTests(unittest.TestCase):
@@ -16,7 +18,28 @@ class ScreenshotTests(unittest.TestCase):
                 }
             )
         )
+        self.assertTrue(_is_hdr({"profile": "Dolby Vision 8.1"}))
         self.assertFalse(_is_hdr({"color_transfer": "bt709"}))
+
+    def test_probe_falls_back_when_ffprobe_lacks_side_data_section(self):
+        failed = subprocess.CompletedProcess(
+            [],
+            1,
+            "",
+            "No match for section 'stream_side_data'\nInvalid argument",
+        )
+        succeeded = subprocess.CompletedProcess(
+            [],
+            0,
+            '{"streams":[{"duration":"120","width":1920,"height":1080,"profile":"High","color_transfer":"bt709"}],"format":{}}',
+            "",
+        )
+        with patch("random_video_screenshots.cli._run", side_effect=[failed, succeeded]) as run:
+            info = _probe_video("ffprobe", Path("movie.mkv"))
+        self.assertEqual(info["duration"], 120.0)
+        self.assertEqual(run.call_count, 2)
+        fallback_command = run.call_args_list[1].args[0]
+        self.assertNotIn("stream_side_data", " ".join(fallback_command))
 
     def test_hdr_jpg_uses_linear_float_tone_mapping(self):
         options = _filter_option(

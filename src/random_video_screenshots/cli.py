@@ -67,7 +67,32 @@ def _probe_video(ffprobe: str, video_path: Path) -> dict:
         "json",
         str(video_path),
     ]
-    result = _run(command)
+    result = _run(command, check=False)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "未知错误"
+        # Older FFprobe releases do not expose ``stream_side_data`` through
+        # -show_entries and fail before returning any JSON. Retry with the
+        # portable stream/format fields so media probing still works; Dolby
+        # Vision side-data detection remains available on newer FFprobe.
+        if "stream_side_data" in detail or "No match for section" in detail:
+            fallback = [
+                ffprobe,
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                (
+                    "stream=duration,width,height,pix_fmt,profile,color_range,"
+                    "color_space,color_transfer,color_primaries:format=duration"
+                ),
+                "-of",
+                "json",
+                str(video_path),
+            ]
+            result = _run(fallback)
+        else:
+            raise RuntimeError(f"命令执行失败：{detail}")
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
@@ -103,6 +128,9 @@ def _probe_video(ffprobe: str, video_path: Path) -> dict:
 def _is_hdr(info: dict) -> bool:
     transfer = str(info.get("color_transfer") or "").lower()
     if transfer in HDR_TRANSFERS:
+        return True
+    profile = str(info.get("profile") or "").lower()
+    if "dovi" in profile or "dolby vision" in profile:
         return True
     return any(
         "dovi" in value.lower() or "dolby vision" in value.lower()
