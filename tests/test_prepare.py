@@ -719,6 +719,62 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         self.assertTrue(all(name.count("S01D") == 1 for name in renamed_files))
         self.assertEqual(package["files"][1]["episode"], "S01D02")
 
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_tv_disc_folder_does_not_duplicate_a_single_existing_disc_marker(
+        self, prepare_technical_info_mock
+    ):
+        report = """
+PLAYLIST REPORT:
+Name: 00001.MPLS
+VIDEO:
+MPEG-4 AVC Video / 30000 kbps / 1080p / 23.976 fps / 16:9
+AUDIO:
+LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
+"""
+        prepare_technical_info_mock.return_value = (
+            "BDInfo",
+            report,
+            Path("temporary-bdinfo.txt"),
+            "00001",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "JoJo's Bizarre Adventure-2012-S01-[tmdb=45790]"
+            season_root = root / "Season 01"
+            season_root.mkdir(parents=True)
+            original = (
+                "JoJo's Bizarre Adventure 2012 JPN S01D01 "
+                "1080p JPN BluRay AVC LPCM2.0-blucook300@CHDBits.iso"
+            )
+            (season_root / original).write_bytes(b"small test iso")
+
+            with redirect_stdout(io.StringIO()):
+                prepare_main(
+                    [
+                        str(root),
+                        "--title",
+                        "JoJo's Bizarre Adventure",
+                        "--year",
+                        "2012",
+                        "--source",
+                        "BluRay",
+                        "--tmdb-id",
+                        "45790",
+                        "--offline",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                        "--apply",
+                    ]
+                )
+            renamed_files = sorted(path.name for path in root.rglob("*.iso"))
+
+        self.assertEqual(
+            renamed_files,
+            [
+                "JoJo's Bizarre Adventure 2012 JPN S01D01 1080p JPN BluRay AVC LPCM2.0-"
+                "blucook300@CHDBits.iso"
+            ],
+        )
+
     @patch("random_video_screenshots.cli.extract_screenshots")
     def test_screenshot_result_excludes_stale_files(self, extract_screenshots):
         def create_new_file(_video, output, *, count):
