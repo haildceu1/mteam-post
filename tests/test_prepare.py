@@ -547,6 +547,7 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
     def test_disc_collection_edition_drops_disc_marker_but_keeps_region(self):
         self.assertEqual(_clean_disc_marker_from_edition("EUR DISC-1"), "EUR")
         self.assertEqual(_clean_disc_marker_from_edition("MOC Disk 02"), "MOC")
+        self.assertEqual(_clean_disc_marker_from_edition("JPN S01D01 S01D01"), "JPN")
         self.assertIsNone(_clean_disc_marker_from_edition("DISC-1"))
 
     def test_tv_disc_iso_hints_prefer_disc_identity_over_bare_season(self):
@@ -558,6 +559,16 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         # disc-aware identity is what makes this a Blu-ray disc collection.
         self.assertEqual(_disc_episode(first, root), "S01D01")
         self.assertEqual(_disc_episode(second, root), "S01D02")
+
+    def test_tv_disc_iso_uses_last_marker_after_a_previous_bad_rename(self):
+        root = Path(r"/data/JoJo's Bizarre Adventure-2012-S01")
+        first = root / "Season 01" / "JoJo's Bizarre Adventure 2012 JPN S01D01 S01D01 1080p BluRay AVC LPCM2.0-GRP.iso"
+        second = root / "Season 01" / "JoJo's Bizarre Adventure 2012 JPN S01D01 S01D02 1080p BluRay AVC LPCM2.0-GRP.iso"
+        eighth = root / "Season 01" / "JoJo's Bizarre Adventure 2012 JPN S01D01 S01D08 1080p BluRay AVC LPCM2.0-GRP.iso"
+
+        self.assertEqual(_disc_episode(first, root), "S01D01")
+        self.assertEqual(_disc_episode(second, root), "S01D02")
+        self.assertEqual(_disc_episode(eighth, root), "S01D08")
 
     def test_bdinfo_report_can_supply_disc_set_title_media(self):
         report = """
@@ -651,6 +662,62 @@ English
                 str(Path("Season 01") / "The Nevers 2021 S01D02 1080p BluRay AVC TrueHD5.1-TTG.iso"),
             ],
         )
+
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_tv_disc_folder_repairs_duplicate_previous_disc_marker(self, prepare_technical_info_mock):
+        report = """
+PLAYLIST REPORT:
+Name: 00001.MPLS
+VIDEO:
+MPEG-4 AVC Video / 30000 kbps / 1080p / 23.976 fps / 16:9
+AUDIO:
+LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
+"""
+        prepare_technical_info_mock.return_value = (
+            "BDInfo",
+            report,
+            Path("temporary-bdinfo.txt"),
+            "00001",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "JoJo's Bizarre Adventure-2012-S01-[tmdb=45790]"
+            season_root = root / "Season 01"
+            season_root.mkdir(parents=True)
+            for disc in range(1, 9):
+                marker = f"S01D{disc:02d}"
+                name = (
+                    "JoJo's Bizarre Adventure 2012 JPN S01D01 "
+                    f"{marker} 1080p JPN BluRay AVC LPCM2.0-blucook300@CHDBits.iso"
+                )
+                (season_root / name).write_bytes(b"small test iso")
+
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root),
+                        "--title",
+                        "JoJo's Bizarre Adventure",
+                        "--year",
+                        "2012",
+                        "--source",
+                        "BluRay",
+                        "--tmdb-id",
+                        "45790",
+                        "--offline",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                        "--apply",
+                    ]
+                )
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            renamed_root = root.parent / "JoJo's Bizarre Adventure-2012-S01-[tmdb=45790]"
+            renamed_files = sorted(path.name for path in renamed_root.rglob("*.iso"))
+
+        self.assertEqual(len(renamed_files), 8)
+        self.assertTrue(any("S01D01" in name and "S01D01 S01D01" not in name for name in renamed_files), renamed_files)
+        self.assertTrue(any("S01D08" in name for name in renamed_files))
+        self.assertTrue(all(name.count("S01D") == 1 for name in renamed_files))
+        self.assertEqual(package["files"][1]["episode"], "S01D02")
 
     @patch("random_video_screenshots.cli.extract_screenshots")
     def test_screenshot_result_excludes_stale_files(self, extract_screenshots):

@@ -1916,22 +1916,30 @@ def _season_number(value: str) -> int | None:
 
 
 def _disc_number(value: str) -> int | None:
-    normalized = re.search(r"\bS\d{1,2}D0*(\d{1,2})(?!\d)", value, re.I)
-    if normalized:
-        return int(normalized.group(1))
-    chinese = re.search(
+    # A second pass over an already-normalized disc set can leave the old
+    # identity in front of the actual marker, e.g. ``S01D01 S01D03``.  Pick
+    # the last explicit marker, which is the one belonging to this file.
+    markers: list[tuple[int, int]] = [
+        (match.start(), int(match.group(1)))
+        for match in re.finditer(r"\bS\d{1,2}D0*(\d{1,2})(?!\d)", value, re.I)
+    ]
+    for match in re.finditer(
         r"第\s*([0-9零〇一二两兩三四五六七八九十]+)\s*(?:碟|盘|盤|张|張)",
         value,
         re.I,
-    )
-    if chinese:
-        return _number_token(chinese.group(1))
-    western = re.search(
+    ):
+        number = _number_token(match.group(1))
+        if number is not None:
+            markers.append((match.start(), number))
+    for match in re.finditer(
         r"(?:^|[^A-Z0-9])(?:DISC|DISK|VOL(?:UME)?|D)[ ._-]*0*(\d{1,2})(?!\d)",
         value,
         re.I,
-    )
-    return int(western.group(1)) if western else None
+    ):
+        markers.append((match.start(), int(match.group(1))))
+    if markers:
+        return max(markers, key=lambda item: item[0])[1]
+    return None
 
 
 def _disc_episode(path: Path, root: Path) -> str | None:
@@ -1956,7 +1964,7 @@ def _clean_disc_marker_from_edition(value: str | None) -> str | None:
     if not value:
         return value
     cleaned = re.sub(
-        r"(?:^|[ ._-])(?:DISC|DISK|D)[ ._-]*0*\d{1,2}(?=$|[ ._-])",
+        r"(?:^|[ ._-])(?:S\d{1,2}D\d{1,2}|(?:DISC|DISK|D)[ ._-]*0*\d{1,2})(?=$|[ ._-])",
         " ",
         value,
         flags=re.I,
