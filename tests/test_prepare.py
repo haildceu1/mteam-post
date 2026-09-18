@@ -861,6 +861,11 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
             payload = json.loads(package_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["prepared_path"], str(renamed_root))
             self.assertEqual(payload["torrent_root_name"], renamed_root.name)
+            backup = Path(payload["rename_backup_path"])
+            self.assertTrue(backup.is_file())
+            backup_text = backup.read_text(encoding="utf-8")
+            self.assertIn("Example Show", backup_text)
+            self.assertIn("Example.Show.S01E01.mkv", backup_text)
 
     @patch("random_video_screenshots.cli.extract_screenshots")
     def test_screenshot_result_excludes_stale_files(self, extract_screenshots):

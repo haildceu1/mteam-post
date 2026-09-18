@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .mteam_fill import main as mteam_fill_main
-from .prepare import _confirm_rename_preview, main as prepare_main
+from .prepare import _confirm_rename_preview, _write_rename_backup, main as prepare_main
 
 
 def _default_profile_dir() -> Path:
@@ -169,13 +169,21 @@ def _apply_reused_single_file_rename(
     if not _confirm_rename_preview(needs_rename=True, skip_confirmation=skip_confirmation):
         raise ValueError("已取消重命名；未修改源文件，也未继续填写发布页。")
 
+    backup_path = _write_rename_backup(
+        package_path.parent / "rename-backup.txt",
+        root_before=input_path,
+        root_after=target,
+        pairs=[(input_path, target)],
+    )
     input_path.rename(target)
     payload["prepared_path"] = str(target)
+    payload["rename_backup_path"] = str(backup_path)
     package_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     print(f"已按 M-Team 标题重命名单个文件：{input_path.name} → {target.name}")
+    print(f"已保存原始名称备份：{backup_path}")
     return True
 
 

@@ -2393,6 +2393,30 @@ def _same_path(left: Path, right: Path) -> bool:
     return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
 
 
+def _write_rename_backup(
+    backup_path: Path,
+    *,
+    root_before: Path,
+    root_after: Path,
+    pairs: list[tuple[Path, Path]],
+) -> Path:
+    """Persist a human-readable, one-way rename map before changing paths."""
+    backup_path = backup_path.resolve()
+    if not backup_path.exists():
+        lines = [
+            "media-title-rename rename backup v1",
+            f"created_at={int(time.time())}",
+            f"root_before={root_before}",
+            f"root_after={root_after}",
+            "# type<TAB>original absolute path<TAB>new absolute path",
+            f"ROOT\t{root_before}\t{root_after}",
+        ]
+        lines.extend(f"FILE\t{source}\t{target}" for source, target in pairs)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return backup_path
+
+
 def _apply_folder_renames(
     plans: list[FolderPlan],
     *,
@@ -2604,6 +2628,13 @@ def _apply_cached_folder_prepare(
     ):
         return None
 
+    backup_path = _write_rename_backup(
+        package_path.parent / "rename-backup.txt",
+        root_before=root,
+        root_after=target_root,
+        pairs=[(source, final_target) for source, _apply_target, final_target in pairs],
+    )
+
     completed: list[tuple[Path, Path]] = []
     created: list[Path] = []
     root_renamed = False
@@ -2634,6 +2665,7 @@ def _apply_cached_folder_prepare(
 
     payload["prepared_path"] = str(target_root)
     payload["filename"] = target_root.name
+    payload["rename_backup_path"] = str(backup_path)
     for record, (_source, _apply_target, final_target) in zip(records, pairs):
         record["prepared_path"] = str(final_target)
         record["target_path"] = str(final_target)
@@ -3017,6 +3049,16 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         },
     }
     package_path = output_dir / "mteam-prepare.json"
+    backup_path = _write_rename_backup(
+        output_dir / "rename-backup.txt",
+        root_before=root,
+        root_after=target_root,
+        pairs=[
+            (plan.source_path, target_root / plan.logical_path)
+            for plan in provisional
+        ],
+    )
+    payload["rename_backup_path"] = str(backup_path)
     package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if args.apply:
@@ -3045,6 +3087,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     print(f"  发布资料包：{package_path}")
     if not args.apply:
         print("  注意：源文件尚未改名；确认后重新执行并添加 --apply。")
+    print(f"  原始名称备份：{backup_path}")
     return package_path
 
 
@@ -3178,6 +3221,12 @@ def main(argv: list[str] | None = None) -> Path | None:
         if not args.skip_torrent:
             piece_length = create_private_v1_torrent(path, torrent_path, target.name)
 
+        backup_path = _write_rename_backup(
+            output_dir / "rename-backup.txt",
+            root_before=path,
+            root_after=target,
+            pairs=[(path, target)],
+        )
         prepared_path = path
         if args.apply and target != path:
             path.rename(target)
@@ -3221,6 +3270,7 @@ def main(argv: list[str] | None = None) -> Path | None:
                 "comment": "",
                 "source": "",
             },
+            "rename_backup_path": str(backup_path),
         }
         package_path = output_dir / "mteam-prepare.json"
         package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3235,6 +3285,7 @@ def main(argv: list[str] | None = None) -> Path | None:
         if not args.skip_torrent:
             print(f"  V1 私有种子：{torrent_path}")
         print(f"  发布资料包：{package_path}")
+        print(f"  原始名称备份：{backup_path}")
         if not args.apply and target != path:
             print(f"  注意：源文件尚未改名；确认后可重新执行并添加 --apply，目标名为 {target.name}")
         return package_path

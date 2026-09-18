@@ -93,6 +93,9 @@ class PublishTests(unittest.TestCase):
             self.assertTrue(target.exists())
             saved = json.loads(package.read_text(encoding="utf-8"))
             self.assertEqual(saved["prepared_path"], str(target))
+            backup = prepare_dir / "rename-backup.txt"
+            self.assertTrue(backup.is_file())
+            self.assertIn("input.mkv", backup.read_text(encoding="utf-8"))
 
         prepare_main.assert_not_called()
         self.assertEqual(mteam_fill_main.call_args.args[0][0], str(package.resolve()))
