@@ -179,6 +179,18 @@ def _get_text(url: str, headers: dict[str, str] | None = None, timeout: int = 12
         return response.read().decode("utf-8", errors="replace")
 
 
+_DOUBAN_HEADERS = {
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+    "Referer": "https://movie.douban.com/",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/153.0.0.0 Safari/537.36"
+    ),
+}
+
+
 class TmdbClient:
     def __init__(self, read_token: str = "", api_key: str = "") -> None:
         self.read_token = read_token.strip()
@@ -337,7 +349,7 @@ def _douban_search_page_candidates(
 ) -> list[DoubanMatch]:
     """Search Douban's regular result page, which includes TV-season entries."""
     url = "https://search.douban.com/movie/subject_search?search_text=" + urllib.parse.quote(query)
-    text = _get_text(url, headers={"User-Agent": "Mozilla/5.0"})
+    text = _get_text(url, headers=_DOUBAN_HEADERS)
     marker = "window.__DATA__"
     start = text.find(marker)
     if start < 0:
@@ -401,7 +413,7 @@ def _douban_candidates(
         for query in _name_variants(name):
             url = "https://movie.douban.com/j/subject_suggest?q=" + urllib.parse.quote(query)
             try:
-                data = _get_json(url, headers={"User-Agent": "Mozilla/5.0"})
+                data = _get_json(url, headers=_DOUBAN_HEADERS)
             except (OSError, urllib.error.URLError, json.JSONDecodeError):
                 continue
             for item in data[:10]:
