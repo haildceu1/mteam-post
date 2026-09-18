@@ -434,6 +434,14 @@ def _douban_candidates(
                         season_number=season,
                     )
                 )
+            # A 100-point same-year result is already an exact match.  Do not
+            # continue issuing variant queries and trigger Douban throttling.
+            if any(
+                candidate.score >= 100
+                and (not year or candidate.year == year)
+                for candidate in found.values()
+            ):
+                break
 
     if expected_season is not None:
         # The suggest endpoint frequently returns only the newest season.  The
@@ -2214,7 +2222,11 @@ def _douban_for_release(
                 season_names.append(f"{name} Season {season_number}")
                 if _contains_cjk(name):
                     season_names.append(f"{name} 第{season_number}季")
-            search_names = season_names + search_names
+            # Query the bare series names first.  Limited series and anime
+            # often have one series-level Douban subject without a season
+            # suffix; querying several season variants first can trigger
+            # Douban rate limiting before the useful bare query is reached.
+            search_names = search_names + season_names
         deduplicated_names: list[str] = []
         seen_names: set[str] = set()
         for name in search_names:

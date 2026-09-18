@@ -349,6 +349,7 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
             )
         self.assertIs(result, candidate)
         names, search_year = search.call_args.args
+        self.assertLess(names.index("Survivor"), names.index("Survivor Pearl Islands"))
         self.assertEqual(search_year, "2003")
         self.assertEqual(search.call_args.kwargs["expected_season"], 7)
         self.assertIn("Survivor", choose.call_args.kwargs["expected_titles"])
