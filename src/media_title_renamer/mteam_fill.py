@@ -380,12 +380,35 @@ def _select_category(driver, category: str) -> bool:
               .replaceAll('藝', '艺').replaceAll('電', '电').replaceAll('視', '视')
               .replaceAll('畫', '画').replaceAll('動', '动');
             const wanted = canon(arguments[0]);
-            return [...document.querySelectorAll('[role="option"], .ant-select-item-option, li, .ant-cascader-menu-item')]
-              .filter(el => el.offsetParent !== null)
-              .find(el => {
+            const candidates = [...document.querySelectorAll(
+              '[role="option"], .ant-select-item-option, li, .ant-cascader-menu-item'
+            )];
+            const match = candidates.find(el => {
+                const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
                 const text = canon(el.textContent || '');
-                return text === wanted || text.includes(wanted) || wanted.includes(text);
-              }) || null;
+                return visible && (text === wanted || text.includes(wanted) || wanted.includes(text));
+              });
+            if (match) return match;
+
+            // Ant Design may virtualize the option list.  In that case an
+            // off-screen option is not present in the DOM until the popup's
+            // internal scroller is advanced.  Scroll every visible list
+            // holder a page at a time and retry after the browser renders it.
+            const holders = [...document.querySelectorAll(
+              '.ant-select-dropdown .rc-virtual-list-holder, '
+              + '.ant-select-dropdown .ant-select-dropdown-menu, '
+              + '.ant-select-dropdown, [role="listbox"]'
+            )].filter(el => el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+            for (const holder of holders) {
+              const before = holder.scrollTop;
+              const step = Math.max(holder.clientHeight * 0.8, 120);
+              holder.scrollTop = Math.min(holder.scrollHeight, before + step);
+              if (holder.scrollTop !== before) return null;
+            }
+            // The page itself may be the scroll container when the dropdown
+            // is rendered at the viewport edge rather than in a virtual list.
+            window.scrollBy(0, Math.max(window.innerHeight * 0.7, 240));
+            return null;
             """,
             category,
         )

@@ -7,6 +7,7 @@ from media_title_renamer.mteam_fill import (
     _has_mteam_auth,
     _is_login_url,
     _parser,
+    _select_category,
     _wait_for_mteam_auth,
     load_mteam_session,
 )
@@ -100,6 +101,36 @@ class MTeamFillTests(unittest.TestCase):
         self.assertEqual(len(session.cookies), 1)
         self.assertEqual(session.cookies[0]["domain"], ".kp.m-team.cc")
         self.assertEqual(session.cookies[0]["name"], "auth")
+
+    def test_category_selection_retries_after_scrolling_virtualized_dropdown(self):
+        class Select:
+            def __init__(self):
+                self.clicked = False
+
+            def click(self):
+                self.clicked = True
+
+        class Driver:
+            def __init__(self):
+                self.select = Select()
+                self.calls = 0
+                self.clicked_option = False
+
+            def execute_script(self, script, *args):
+                self.calls += 1
+                if self.calls == 1:
+                    return self.select
+                if "arguments[0].click()" in script:
+                    self.clicked_option = True
+                    return None
+                # First lookup represents the visible top of the list; the
+                # second succeeds after the JS scroll step.
+                return None if self.calls == 2 else object()
+
+        driver = Driver()
+        self.assertTrue(_select_category(driver, "动画/Bluray"))
+        self.assertTrue(driver.select.clicked)
+        self.assertTrue(driver.clicked_option)
 
 
 if __name__ == "__main__":
