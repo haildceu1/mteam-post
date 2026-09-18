@@ -2488,7 +2488,27 @@ def _cached_folder_prepare_package(root: Path) -> tuple[Path, dict[str, Any], Pa
             continue
         target_name = str(payload.get("target_filename") or "").strip()
         torrent_root_name = str(payload.get("torrent_root_name") or "").strip()
-        if not target_name or target_name != torrent_root_name:
+        if not target_name:
+            # 0.10.27 and earlier wrote the future prepared_path before the
+            # final root rename, but did not persist target_filename.  Such a
+            # package is recoverable only when that future root is still
+            # absent; an ordinary no-apply package has prepared_path == root
+            # and must not be guessed from its old filename.
+            if prepared_path == wanted:
+                continue
+            legacy_target = prepared_path
+            try:
+                if not _same_path(legacy_target.parent, root.parent) or not legacy_target.name:
+                    continue
+            except OSError:
+                continue
+            target_name = legacy_target.name
+            payload["target_filename"] = target_name
+            payload["target_prepared_path"] = str(legacy_target)
+        if not torrent_root_name:
+            torrent_root_name = target_name
+            payload["torrent_root_name"] = torrent_root_name
+        if target_name != torrent_root_name:
             # Packages from versions before the two-stage flow used the old
             # root name inside the torrent and cannot safely be applied here.
             continue
