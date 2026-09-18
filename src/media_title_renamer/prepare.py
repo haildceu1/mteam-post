@@ -1960,6 +1960,44 @@ def _disc_episode(path: Path, root: Path) -> str | None:
     return f"S{season:02d}D{disc:02d}"
 
 
+def _matching_tv_disc_isos(path: Path) -> tuple[Path, list[Path]] | None:
+    """Find all same-season disc ISOs beside one supplied disc.
+
+    A single ISO is otherwise handled by the movie/single-file path.  When
+    its name (or an ancestor directory) contains both a season and disc
+    marker, conservatively expand only the ISO files in the same directory
+    with that season.  This supports both ``Season 02/*.iso`` layouts and
+    download folders containing several seasons without mixing their discs.
+    """
+    if path.suffix.casefold() != ".iso":
+        return None
+    if _disc_number(path.stem) is None:
+        return None
+    context = " ".join((path.stem, *path.parent.parts))
+    season = _season_number(context)
+    if season is None:
+        return None
+    matches: list[Path] = []
+    for candidate in sorted(path.parent.glob("*"), key=lambda item: item.name.casefold()):
+        if not candidate.is_file() or candidate.suffix.casefold() != ".iso":
+            continue
+        if _disc_number(candidate.stem) is None:
+            continue
+        candidate_context = " ".join((candidate.stem, *candidate.parent.parts))
+        if _season_number(candidate_context) != season:
+            continue
+        matches.append(candidate.resolve())
+    if len(matches) <= 1:
+        return None
+    disc_numbers = [_disc_number(candidate.stem) for candidate in matches]
+    if len(set(disc_numbers)) != len(disc_numbers):
+        raise ValueError(
+            f"同一目录发现多个第 {season} 季的重复碟号，未自动合并；请传入整季目录以避免混合不同版本："
+            f"{path.parent}"
+        )
+    return path.parent.resolve(), matches
+
+
 def _clean_disc_marker_from_edition(value: str | None) -> str | None:
     """Remove a disc number misparsed as a Blu-ray edition."""
     if not value:
@@ -2516,7 +2554,10 @@ def _print_folder_rename_preview(
         print(f"  剧集目录：{root.name} → {target_root.name}")
     for plan in plans:
         source = plan.source_path.relative_to(root)
-        target = plan.target_path.relative_to(root)
+        try:
+            target = plan.target_path.relative_to(root)
+        except ValueError:
+            target = plan.target_path.relative_to(target_root)
         marker = "=" if source == target else "→"
         print(f"  {source} {marker} {target}")
 
@@ -2703,12 +2744,19 @@ def _apply_cached_folder_prepare(
     return package_path
 
 
-def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
+def _prepare_folder(
+    args: argparse.Namespace,
+    root: Path,
+    *,
+    selected_paths: list[Path] | None = None,
+    rename_root: bool = True,
+    input_reference: Path | None = None,
+) -> Path:
     if args.kind == "movie":
         raise ValueError("文件夹模式用于剧集，--kind 不能设为 movie")
     if args.episode:
         raise ValueError("文件夹模式会从每个文件名识别季集，请不要传 --episode")
-    if args.apply:
+    if args.apply and rename_root:
         cached = _cached_folder_prepare_package(root)
         if cached is not None:
             return _apply_cached_folder_prepare(args, root, cached)
@@ -2717,7 +2765,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         args = argparse.Namespace(**vars(args))
         args.tmdb_id = embedded_tmdb_id
         print(f"已从目录名识别 TMDB ID：{embedded_tmdb_id}")
-    paths = _folder_videos(root)
+    paths = selected_paths or _folder_videos(root)
     if not paths:
         raise ValueError("目录中没有找到支持的视频文件")
 
@@ -2823,7 +2871,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     tmdb_id = tmdb.id if tmdb else args.tmdb_id
     season = _season_label([hints.episode or "" for _path, hints in probes])
     series_folder_name = _series_folder_name(title, year, tmdb_id, season=season)
-    target_root = root.with_name(series_folder_name)
+    target_root = root.with_name(series_folder_name) if rename_root else root.parent / series_folder_name
     episode_seasons = {
         season_number
         for _path, hints in probes
@@ -2837,8 +2885,10 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     root_seasons = _season_numbers_in_text(root.name)
     flatten_single_season = (
         len(episode_seasons) == 1
-        and len(root_seasons) == 1
-        and episode_seasons == root_seasons
+        and (
+            (len(root_seasons) == 1 and episode_seasons == root_seasons)
+            or not rename_root
+        )
     )
     if flatten_single_season:
         print("提示：输入父目录已标明单季，视频将直接放入改名后的单季根目录，不再建立重复的 Season 子目录。")
@@ -2883,9 +2933,14 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             country=country,
             include_audio_count=args.audio_count,
         )
-        season_directory = root if flatten_single_season else root / _season_folder(episode)
-        target = season_directory / (release_title + path.suffix.lower())
-        logical = target.relative_to(root)
+        if rename_root:
+            season_directory = root if flatten_single_season else root / _season_folder(episode)
+            target = season_directory / (release_title + path.suffix.lower())
+            logical = target.relative_to(root)
+        else:
+            season_directory = target_root if flatten_single_season else target_root / _season_folder(episode)
+            target = season_directory / (release_title + path.suffix.lower())
+            logical = target.relative_to(target_root)
         provisional.append(
             FolderPlan(
                 source_path=path,
@@ -2917,7 +2972,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     _print_folder_rename_preview(provisional, root=root, target_root=target_root)
     if args.apply and not _confirm_rename_preview(
         needs_rename=(
-            not _same_path(root, target_root)
+            (rename_root and not _same_path(root, target_root))
             or any(plan.source_path != plan.target_path for plan in provisional)
         ),
         skip_confirmation=args.yes,
@@ -2992,13 +3047,9 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         )
     file_records: list[dict[str, Any]] = []
     for index, plan in enumerate(provisional, start=1):
-        final_prepared_path = (
-            target_root / plan.target_path.relative_to(root)
-            if args.apply
-            else plan.source_path
-        )
+        final_prepared_path = target_root / plan.logical_path if args.apply else plan.source_path
         final_representative_path = (
-            target_root / representative.target_path.relative_to(root)
+            target_root / representative.logical_path
             if args.apply
             else representative.source_path
         )
@@ -3051,13 +3102,13 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     payload = {
         "schema_version": 1,
         "created_at": int(time.time()),
-        "input_path": str(root),
-        "prepared_path": str(target_root if args.apply else root),
+        "input_path": str(input_reference or root),
+        "prepared_path": str(target_root if args.apply else (input_reference or root)),
         "target_prepared_path": str(target_root),
         "target_filename": target_root.name,
         "torrent_root_name": torrent_root_name,
         "release_name": pack_title,
-        "filename": target_root.name if args.apply else root.name,
+        "filename": target_root.name,
         "kind": "tv",
         "episode": season,
         "year": year or "",
@@ -3072,7 +3123,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         "source_language": LANGUAGE_NAMES.get(language_code.lower(), language_code),
         "media": asdict(representative.media),
         "media_probe_path": str(
-            target_root / representative.target_path.relative_to(root)
+            target_root / representative.logical_path
             if args.apply
             else representative.source_path
         ),
@@ -3098,7 +3149,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     package_path = output_dir / "mteam-prepare.json"
     backup_path = _write_rename_backup(
         output_dir / "rename-backup.txt",
-        root_before=root,
+        root_before=(root if rename_root else (input_reference or root)),
         root_after=target_root,
         pairs=[
             (plan.source_path, target_root / plan.logical_path)
@@ -3108,15 +3159,19 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     payload["rename_backup_path"] = str(backup_path)
     package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if args.apply:
+    if args.apply and rename_root:
         _apply_folder_renames(provisional, root=root, target_root=target_root)
+    elif args.apply:
+        _apply_folder_renames(provisional)
 
     print("\nM-Team 整季发布资料已准备完：")
     print(f"  整季标题：{pack_title}")
     rename_status = "已全部改名" if args.apply else "尚未改名"
     print(f"  视频文件：{len(provisional)} 个，{rename_status}")
-    if args.apply and not _same_path(root, target_root):
+    if args.apply and rename_root and not _same_path(root, target_root):
         print(f"  剧集目录：{target_root}")
+    elif not rename_root:
+        print(f"  单个 ISO 自动匹配的同季目录：{target_root}")
     elif not _same_path(root, target_root):
         print(f"  剧集目录预览：{root.name} → {target_root.name}")
     print(f"  副标题：{subtitle or '未识别'}")
@@ -3147,6 +3202,21 @@ def main(argv: list[str] | None = None) -> Path | None:
             return _prepare_folder(args, path)
         if not path.is_file():
             raise FileNotFoundError(f"找不到媒体文件或文件夹：{path}")
+        if path.suffix.casefold() == ".iso" and args.kind != "movie" and not args.episode:
+            disc_collection = _matching_tv_disc_isos(path)
+            if disc_collection is not None:
+                collection_root, collection_paths = disc_collection
+                print(
+                    f"检测到剧集分碟 ISO：已从 {path.name} 自动匹配同目录同季的 "
+                    f"{len(collection_paths)} 张光盘。"
+                )
+                return _prepare_folder(
+                    args,
+                    collection_root,
+                    selected_paths=collection_paths,
+                    rename_root=False,
+                    input_reference=path,
+                )
         precomputed_bdinfo: tuple[str, str] | None = None
         try:
             initial_media = read_mediainfo(path)

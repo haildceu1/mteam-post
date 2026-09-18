@@ -23,6 +23,7 @@ from media_title_renamer.prepare import (
     _douban_for_release,
     _embedded_tmdb_id,
     _media_from_bdinfo,
+    _matching_tv_disc_isos,
     _mount_iso,
     _resume_paths,
     _resume_tmdb_id_for_folder,
@@ -55,6 +56,76 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_single_disc_iso_matches_only_same_season_siblings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "Show.Season2.Disc1.2020.BluRay.AVC.iso"
+            same_season = root / "Show.Season2.Disc2.2020.BluRay.AVC.iso"
+            other_season = root / "Show.Season3.Disc1.2021.BluRay.AVC.iso"
+            for path in (selected, same_season, other_season):
+                path.write_bytes(b"iso")
+
+            collection = _matching_tv_disc_isos(selected)
+
+        self.assertIsNotNone(collection)
+        assert collection is not None
+        self.assertEqual({path.name for path in collection[1]}, {selected.name, same_season.name})
+
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_single_disc_iso_prepare_moves_only_same_season_collection(self, prepare_technical_info_mock):
+        report = """
+PLAYLIST REPORT:
+Name: 00001.MPLS
+VIDEO:
+MPEG-4 AVC Video / 30000 kbps / 1080p / 23.976 fps / 16:9
+AUDIO:
+LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
+"""
+        prepare_technical_info_mock.return_value = (
+            "BDInfo",
+            report,
+            Path("temporary-bdinfo.txt"),
+            "00001",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "downloads"
+            root.mkdir()
+            selected = root / "Show.Season2.Disc1.2020.JPN.BluRay.AVC.LPCM.2.0-GRP.iso"
+            same_season = root / "Show.Season2.Disc2.2020.JPN.BluRay.AVC.LPCM.2.0-GRP.iso"
+            other_season = root / "Show.Season3.Disc1.2021.JPN.BluRay.AVC.LPCM.2.0-GRP.iso"
+            for path in (selected, same_season, other_season):
+                path.write_bytes(b"small test iso")
+
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(selected),
+                        "--title",
+                        "Show",
+                        "--year",
+                        "2020",
+                        "--source",
+                        "BluRay",
+                        "--offline",
+                        "--douban-url",
+                        "https://movie.douban.com/subject/1/",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                        "--apply",
+                        "--yes",
+                    ]
+                )
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            target_root = Path(package["target_prepared_path"])
+            renamed = sorted(path.name for path in target_root.glob("*.iso"))
+
+            self.assertTrue(other_season.is_file())
+
+        self.assertEqual(len(renamed), 2, sorted(str(path) for path in (root / "downloads").parent.rglob("*.iso")))
+        self.assertEqual(package["input_path"], str(selected))
+        self.assertEqual({record["episode"] for record in package["files"]}, {"S02D01", "S02D02"})
+        self.assertTrue(all("Season 02" not in record["relative_path"] for record in package["files"]))
+
     def test_single_season_root_detection_distinguishes_multi_season_pack(self):
         self.assertEqual(_season_numbers_in_text("Slow Horses S01"), {1})
         self.assertEqual(_season_numbers_in_text("Slow Horses Season 1"), {1})

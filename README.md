@@ -294,7 +294,7 @@ media-title-rename prepare "F:\20.22" --apply
 # 分季放在子目录也会自动递归处理
 media-title-rename prepare "F:\TV\20.22" --apply
 
-# 剧集蓝光 ISO：从“第一季/第1碟”识别为 S01D01，并自动使用 BDInfo
+# 剧集蓝光 ISO：传入一张分碟 ISO 时，自动匹配同目录同季的其它分碟并使用 BDInfo
 media-title-rename prepare "D:\永不者-The.Nevers-{tmdb=80828}" --apply
 
 # 自动匹配不确定时可以明确指定
@@ -329,6 +329,8 @@ media-title-rename prepare "F:\TV\The Office" --apply
 例如，输入 `D:\幸存者：真人秀  第七季`，并使用 `--title Survivor --year 2000 --tmdb-id 14658 --apply` 后，目录会变为 `D:\Survivor-2000-S07-[tmdb=14658]\`，视频直接位于该单季根目录；如果未能取得 TMDB ID，则会变为 `D:\Survivor-2000-S07\`，程序会在输出中明确提示。这样同一剧集的 S01、S07 等资料包可以在同一父目录下并存。多季输入（例如 `D:\Survivor S01-S07`）才会在根目录下建立 `Season 01` 至 `Season 07`。
 
 剧集蓝光 ISO 也支持文件夹模式。季数可以写成 `第一季`、`第1季`、`Season 1` 或 `S01`；碟号可以写成 `第1碟`、`第1盘`、`Disc 1`、`Disk 1` 或 `D01`。季号和碟号可以出现在同一文件名中，例如 `Dexter S01 Disc01.iso`，也可以分别出现在父目录和文件名中。程序会优先组合为 `S01D01`，不会把文件名中的单独 `S01` 错当成普通整季集号。例如 `[永不者第一季.The.Nevers.2021][第1碟][TTG].iso` 会规范为含 `S01D01` 的文件名；若输入父目录已明确是单季，文件直接放在该单季根目录，否则才移入 `Season 01`，第 2 碟相应为 `S01D02`。程序只对第一张光盘运行一次 BDInfo 并从第一张光盘生成 4 张截图，其余光盘复用技术参数；剧集 ISO 会优先从 BDInfo 列表中选择常见单集时长的 MPLS，排除整碟/整季合集播放列表。若没有可识别的单集时长候选，会提示通过 `--bdinfo-playlist` 手工指定，避免误扫合集。所有光盘仍会一起写入同一个 V1 私有多文件种子。大于 DVD9 容量且没有写 `BluRay` 的 ISO 会按 Blu-ray 原盘识别，目录名中的 `{tmdb=80828}`、`[tmdb=80828]` 也会自动作为 TMDB ID。若容量信息或命名不足以判断来源，可显式添加 `--source BluRay` 或 `--source "UHD BluRay"`。
+
+如果 `prepare`/`publish` 的输入是单张带有季号和碟号的 ISO，程序会先在该 ISO 所在目录中查找同季的其它 `.iso` 文件，只合并同一季且碟号不重复的文件；同目录的其它季不会被加入，原目录也不会被整体改名。匹配到的整组光盘会共用一次 BDInfo、截图和发布资料，并写入一个 V1 私有多文件种子。若同季出现重复碟号（通常表示同目录有多个版本），程序会停止自动合并并要求传入整季目录，避免把不同版本混入同一个种子。
 
 ### TMDB 名称增强
 
@@ -366,7 +368,10 @@ media-title-rename publish "F:\TV\20.22"
 # 没有资料包：执行一次新的准备流程
 media-title-rename publish "F:\TV\20.22" --apply
 
-# 剧集蓝光 ISO 光盘文件夹：识别“第一季/第1碟、第2碟”，一次准备并填表
+# 剧集蓝光 ISO：传入任意一张同季分碟即可自动扩展为整季集合
+media-title-rename publish "D:\Downloads\Dexter S02 Disc01.iso" --apply
+
+# 也可以直接传入包含多季/多碟的剧集目录
 media-title-rename publish "D:\永不者-The.Nevers-{tmdb=80828}" --apply
 
 # 即使存在资料包，也强制重新准备
