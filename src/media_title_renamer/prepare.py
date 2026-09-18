@@ -390,8 +390,13 @@ def _douban_candidates(
     names: list[str],
     year: str | None,
     expected_season: int | None = None,
+    diagnostics: list[str] | None = None,
 ) -> list[DoubanMatch]:
     found: dict[str, DoubanMatch] = {}
+
+    def note(message: str) -> None:
+        if diagnostics is not None and message not in diagnostics:
+            diagnostics.append(message)
 
     def add(candidate: DoubanMatch) -> None:
         if candidate.id and (candidate.id not in found or candidate.score > found[candidate.id].score):
@@ -414,7 +419,30 @@ def _douban_candidates(
             url = "https://movie.douban.com/j/subject_suggest?q=" + urllib.parse.quote(query)
             try:
                 data = _get_json(url, headers=_DOUBAN_HEADERS)
-            except (OSError, urllib.error.URLError, json.JSONDecodeError):
+            except urllib.error.HTTPError as exc:
+                note(f"HTTP {exc.code}")
+                continue
+            except urllib.error.URLError as exc:
+                reason = str(exc.reason or exc)
+                if isinstance(exc.reason, TimeoutError) or "timed out" in reason.casefold():
+                    note("请求超时")
+                else:
+                    note(f"网络错误：{reason}")
+                continue
+            except json.JSONDecodeError:
+                note("响应不是有效 JSON")
+                continue
+            except OSError as exc:
+                note(f"本地网络错误：{exc}")
+                continue
+            if not isinstance(data, list):
+                note("HTTP 200 返回了非列表响应")
+                continue
+            if not data:
+                # Douban's suggest endpoint commonly masks throttling or
+                # anti-bot decisions as a successful empty JSON response.
+                # Keep this distinct from HTTP 403/429 and connection errors.
+                note("HTTP 200 返回空结果（疑似豆瓣频控/风控，非 HTTP 403/429）")
                 continue
             for item in data[:10]:
                 item_id = str(item.get("id") or "")
@@ -462,7 +490,12 @@ def _douban_candidates(
             try:
                 for candidate in _douban_search_page_candidates(query, year):
                     add(candidate)
-            except (OSError, urllib.error.URLError, json.JSONDecodeError, ValueError):
+            except urllib.error.HTTPError as exc:
+                note(f"HTML 搜索 HTTP {exc.code}")
+            except urllib.error.URLError as exc:
+                note(f"HTML 搜索网络错误：{exc.reason or exc}")
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                note(f"HTML 搜索失败：{exc}")
                 continue
     return sorted(found.values(), key=lambda item: item.score, reverse=True)
 
@@ -2201,6 +2234,7 @@ def _douban_for_release(
 ) -> DoubanMatch | None:
     douban = _manual_douban(args.douban_url) if args.douban_url else None
     if not douban and not args.offline:
+        douban_diagnostics: list[str] = []
         season = _tmdb_season_for_release(args, tmdb, season_number)
         search_year = (season.year if season and season.year else year)
         search_names = [
@@ -2236,7 +2270,12 @@ def _douban_for_release(
                 deduplicated_names.append(name.strip())
         search_names = deduplicated_names
         douban = _choose_douban(
-            _douban_candidates(search_names, search_year, expected_season=season_number),
+            _douban_candidates(
+                search_names,
+                search_year,
+                expected_season=season_number,
+                diagnostics=douban_diagnostics,
+            ),
             expected_season=season_number,
             expected_titles=[
                 name
@@ -2267,7 +2306,11 @@ def _douban_for_release(
                 )
                 if name
             ]
-            bare_candidates = _douban_candidates(bare_names, search_year)
+            bare_candidates = _douban_candidates(
+                bare_names,
+                search_year,
+                diagnostics=douban_diagnostics,
+            )
             expected_titles = [
                 name
                 for name in bare_names
@@ -2283,6 +2326,8 @@ def _douban_for_release(
             if series_candidates:
                 douban = _choose_douban(series_candidates)
         if season_number is not None and not douban:
+            if douban_diagnostics:
+                print("豆瓣查询诊断：" + "；".join(douban_diagnostics[:4]))
             print(
                 f"提示：未找到同时匹配当前剧名和第 {season_number} 季的豆瓣条目，"
                 "已跳过不相关结果以避免误填。"

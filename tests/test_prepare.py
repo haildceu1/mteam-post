@@ -18,6 +18,7 @@ from media_title_renamer.prepare import (
     _clean_disc_marker_from_edition,
     _choose_douban,
     _douban_search_page_candidates,
+    _douban_candidates,
     _douban_for_release,
     _embedded_tmdb_id,
     _media_from_bdinfo,
@@ -52,6 +53,13 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_douban_empty_success_response_is_reported_as_possible_throttle(self):
+        diagnostics: list[str] = []
+        with patch("media_title_renamer.prepare._get_json", return_value=[]):
+            candidates = _douban_candidates(["Tip Toe"], "2026", diagnostics=diagnostics)
+        self.assertEqual(candidates, [])
+        self.assertIn("HTTP 200 返回空结果（疑似豆瓣频控/风控，非 HTTP 403/429）", diagnostics)
+
     @patch("media_title_renamer.prepare.generate_bdinfo_report")
     def test_unTagged_bluray_iso_uses_bdinfo_before_filename_fallback(self, generate_bdinfo):
         report = """DISC INFO:
