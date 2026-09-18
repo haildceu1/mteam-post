@@ -2137,6 +2137,35 @@ def _season_label(episodes: list[str]) -> str:
     return f"S{seasons[0]:02d}-S{seasons[-1]:02d}"
 
 
+def _season_numbers_in_text(value: str) -> set[int]:
+    """Return explicit season numbers written in a folder/name.
+
+    This is intentionally separate from :func:`_season_number`, which returns
+    only the first season for filename parsing.  A root such as
+    ``Show S01-S05`` must be recognized as a multi-season package, while
+    ``Show S01``/``Show Season 1`` is a single-season root and does not need a
+    redundant ``Season 01`` child directory.
+    """
+    numbers: set[int] = set()
+    for match in re.finditer(
+        r"第\s*([0-9零〇一二两兩三四五六七八九十]+)\s*季",
+        value,
+        re.I,
+    ):
+        number = _number_token(match.group(1))
+        if number is not None:
+            numbers.add(number)
+    for match in re.finditer(
+        r"(?:^|[^A-Z0-9])SEASON[\s._-]*0*(\d{1,2})(?!\d)",
+        value,
+        re.I,
+    ):
+        numbers.add(int(match.group(1)))
+    for match in re.finditer(r"(?:^|[^A-Z0-9])S0*(\d{1,2})(?!\d)", value, re.I):
+        numbers.add(int(match.group(1)))
+    return numbers
+
+
 def _season_folder(episode: str) -> str:
     match = re.match(r"S(\d{1,2})", episode, re.I)
     if not match:
@@ -2795,6 +2824,24 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     season = _season_label([hints.episode or "" for _path, hints in probes])
     series_folder_name = _series_folder_name(title, year, tmdb_id, season=season)
     target_root = root.with_name(series_folder_name)
+    episode_seasons = {
+        season_number
+        for _path, hints in probes
+        if (season_number := _season_number_from_episode(hints.episode)) is not None
+    }
+    # A single-season input root already carries its season identity (for
+    # example ``Show S01`` or ``Show Season 1``).  Do not create a redundant
+    # ``Season 01`` child in that case.  A multi-season package such as
+    # ``Show S01-S05`` still gets one child directory per season so the
+    # directory torrent remains unambiguous.
+    root_seasons = _season_numbers_in_text(root.name)
+    flatten_single_season = (
+        len(episode_seasons) == 1
+        and len(root_seasons) == 1
+        and episode_seasons == root_seasons
+    )
+    if flatten_single_season:
+        print("提示：输入父目录已标明单季，视频将直接放入改名后的单季根目录，不再建立重复的 Season 子目录。")
     if not _same_path(root, target_root) and target_root.exists():
         raise FileExistsError(f"目标剧集目录已存在，未执行任何改名：{target_root}")
     if not _same_path(root, target_root):
@@ -2836,7 +2883,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             country=country,
             include_audio_count=args.audio_count,
         )
-        season_directory = root / _season_folder(episode)
+        season_directory = root if flatten_single_season else root / _season_folder(episode)
         target = season_directory / (release_title + path.suffix.lower())
         logical = target.relative_to(root)
         provisional.append(

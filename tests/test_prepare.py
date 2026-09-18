@@ -28,6 +28,7 @@ from media_title_renamer.prepare import (
     _resume_tmdb_id_for_folder,
     _read_initial_iso_media,
     _series_folder_name,
+    _season_numbers_in_text,
     _torrent_file_specs,
     _torrent_resume_identity,
     _unmount_iso,
@@ -54,6 +55,12 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_single_season_root_detection_distinguishes_multi_season_pack(self):
+        self.assertEqual(_season_numbers_in_text("Slow Horses S01"), {1})
+        self.assertEqual(_season_numbers_in_text("Slow Horses Season 1"), {1})
+        self.assertEqual(_season_numbers_in_text("Slow Horses S01-S05"), {1, 5})
+        self.assertEqual(_season_numbers_in_text("第七季"), {7})
+
     def test_rename_preview_confirmation_accepts_yes_and_rejects_other_answers(self):
         with (
             patch("media_title_renamer.prepare.sys.stdin.isatty", return_value=True),
@@ -953,6 +960,64 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         self.assertTrue(all(record["relative_path"].startswith("Season 01") for record in package["files"]))
         self.assertTrue(package["files"][0]["mediainfo_text"])
         self.assertFalse(package["files"][1]["mediainfo_text"])
+
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    def test_single_season_root_does_not_add_redundant_season_directory(self, read_mediainfo):
+        read_mediainfo.return_value = MediaInfo(
+            width=1920,
+            height=1080,
+            resolution="1080p",
+            video_format="AVC",
+            writing_library="",
+            video_codec="AVC",
+            hdr=(),
+            hfr=None,
+            audio_codec="DD",
+            audio_channels="5.1",
+            audio_tracks=1,
+            audio_bitrate=640000,
+            audio_language="en",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Slow Horses S01"
+            root.mkdir()
+            first = root / "Slow.Horses.S01E01.2022.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
+            second = root / "Slow.Horses.S01E02.2022.WEB-DL.1080p.AVC.DD5.1-GRP.mkv"
+            first.write_bytes(b"episode one")
+            second.write_bytes(b"episode two")
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root),
+                        "--title",
+                        "Slow Horses",
+                        "--year",
+                        "2022",
+                        "--source",
+                        "WEB-DL",
+                        "--offline",
+                        "--douban-url",
+                        "https://movie.douban.com/subject/1/",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                        "--apply",
+                        "--yes",
+                    ]
+                )
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+            renamed_root = root.parent / "Slow Horses-2022-S01"
+            prepared_files = sorted(
+                str(path.relative_to(renamed_root)) for path in renamed_root.rglob("*.mkv")
+            )
+
+        self.assertEqual(
+            prepared_files,
+            [
+                "Slow Horses 2022 S01E01 1080p WEB-DL H.264 DD5.1-GRP.mkv",
+                "Slow Horses 2022 S01E02 1080p WEB-DL H.264 DD5.1-GRP.mkv",
+            ],
+        )
+        self.assertTrue(all("Season 01" not in record["relative_path"] for record in package["files"]))
 
     def test_v1_torrent_is_private_and_has_no_tracker_or_source(self):
         with tempfile.TemporaryDirectory() as directory:
