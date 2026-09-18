@@ -2891,7 +2891,10 @@ def _prepare_folder(
         )
     )
     if flatten_single_season:
-        print("提示：输入父目录已标明单季，视频将直接放入改名后的单季根目录，不再建立重复的 Season 子目录。")
+        if rename_root:
+            print("提示：输入父目录已标明单季，视频将直接放入改名后的单季根目录，不再建立重复的 Season 子目录。")
+        else:
+            print("提示：自动匹配结果只有一个季，视频将直接放入新的单季根目录。")
     if not _same_path(root, target_root) and target_root.exists():
         raise FileExistsError(f"目标剧集目录已存在，未执行任何改名：{target_root}")
     if not _same_path(root, target_root):
