@@ -217,6 +217,25 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
             right,
         )
 
+    def test_douban_selection_falls_back_to_matching_series_subject(self):
+        series = DoubanMatch(
+            "11498785",
+            "https://movie.douban.com/subject/11498785/",
+            "JOJO的奇妙冒险",
+            "JoJo's Bizarre Adventure",
+            "2012",
+            86,
+            None,
+        )
+        self.assertIs(
+            _choose_douban(
+                [series],
+                expected_season=1,
+                expected_titles=["JoJo's Bizarre Adventure", "JOJO的奇妙冒险"],
+            ),
+            series,
+        )
+
     def test_single_reasonable_douban_candidate_is_accepted_without_prompt(self):
         candidate = DoubanMatch(
             "3271362",

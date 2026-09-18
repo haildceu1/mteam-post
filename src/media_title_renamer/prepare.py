@@ -453,9 +453,24 @@ def _choose_douban(
     expected_titles: list[str] | None = None,
 ) -> DoubanMatch | None:
     if expected_season is not None:
-        candidates = [item for item in candidates if item.season_number == expected_season]
-        if not candidates:
-            return None
+        season_matches = [item for item in candidates if item.season_number == expected_season]
+        if season_matches:
+            candidates = season_matches
+        else:
+            # Some shows (especially anime) have one Douban subject for the
+            # whole TV series instead of a separate subject for each season.
+            # A matching series-level subject is a safe fallback; candidates
+            # explicitly labeled as another season remain rejected.
+            series_matches = [
+                item
+                for item in candidates
+                if item.season_number is None
+                and item.score >= 75
+                and (not expected_titles or _douban_title_matches(item, expected_titles))
+            ]
+            if not series_matches:
+                return None
+            candidates = series_matches
     if expected_titles and expected_season is not None:
         candidates = [item for item in candidates if _douban_title_matches(item, expected_titles)]
         if not candidates:
