@@ -346,6 +346,7 @@ def _douban_title_parts(
 def _douban_search_page_candidates(
     query: str,
     year: str | None,
+    diagnostics: list[str] | None = None,
 ) -> list[DoubanMatch]:
     """Search Douban's regular result page, which includes TV-season entries."""
     url = "https://search.douban.com/movie/subject_search?search_text=" + urllib.parse.quote(query)
@@ -358,6 +359,11 @@ def _douban_search_page_candidates(
     if payload_start < 0:
         return []
     data, _end = json.JSONDecoder().raw_decode(text[payload_start:])
+    error_info = str(data.get("error_info") or "").strip()
+    if error_info and diagnostics is not None:
+        message = f"豆瓣普通搜索页返回：{error_info}"
+        if message not in diagnostics:
+            diagnostics.append(message)
     found: list[DoubanMatch] = []
     for item in data.get("items", [])[:20]:
         item_id = str(item.get("id") or "")
@@ -488,7 +494,7 @@ def _douban_candidates(
                 continue
             seen_queries.add(query.casefold())
             try:
-                for candidate in _douban_search_page_candidates(query, year):
+                for candidate in _douban_search_page_candidates(query, year, diagnostics=diagnostics):
                     add(candidate)
             except urllib.error.HTTPError as exc:
                 note(f"HTML 搜索 HTTP {exc.code}")

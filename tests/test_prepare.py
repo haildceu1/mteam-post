@@ -191,6 +191,18 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         self.assertEqual(candidates[0].year, "2003")
         self.assertEqual(candidates[0].season_number, 7)
 
+    def test_douban_search_page_reports_server_frequency_limit(self):
+        html = (
+            '<script>window.__DATA__ = '
+            + json.dumps({"total": 0, "error_info": "搜索访问太频繁。", "items": []}, ensure_ascii=False)
+            + ';</script>'
+        )
+        diagnostics: list[str] = []
+        with patch("media_title_renamer.prepare._get_text", return_value=html):
+            candidates = _douban_search_page_candidates("Tip Toe", "2026", diagnostics=diagnostics)
+        self.assertEqual(candidates, [])
+        self.assertIn("豆瓣普通搜索页返回：搜索访问太频繁。", diagnostics)
+
     def test_douban_selection_rejects_a_different_season(self):
         wrong = DoubanMatch("50", "https://movie.douban.com/subject/50/", "幸存者 第五十季", "Survivor Season 50", "2025", 100, 50)
         right = DoubanMatch("3271362", "https://movie.douban.com/subject/3271362/", "幸存者：珍珠岛 第七季", "Survivor: Pearl Islands Season 7", "2003", 100, 7)
