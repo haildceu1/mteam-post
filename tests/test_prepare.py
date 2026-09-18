@@ -97,7 +97,7 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "downloads"
             root.mkdir()
-            selected = root / "JoJo.no.Kimyou.na.Bouken.Season2.Disc1.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook300@CHDBits.iso"
+            selected = root / "JoJo.no.Kimyou.na.Bouken.Season2.Disc1.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook#300@CHDBits.iso"
             same_season = root / "JoJo.no.Kimyou.na.Bouken.Season2.Disc2.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook300@CHDBits.iso"
             other_season = root / "JoJo.no.Kimyou.na.Bouken.Season3.Disc1.2015.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook300@CHDBits.iso"
             for path in (selected, same_season, other_season):
@@ -129,8 +129,9 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         self.assertEqual(len(renamed), 2, sorted(str(path) for path in (root / "downloads").parent.rglob("*.iso")))
         self.assertEqual(package["input_path"], str(selected))
         self.assertEqual({record["episode"] for record in package["files"]}, {"S02D01", "S02D02"})
-        self.assertEqual(package["group"], "blucook300@CHDBits")
+        self.assertEqual(package["group"], "blucook#300@CHDBits")
         self.assertTrue(package["filename"].startswith("JoJo no Kimyou na Bouken-2014-S02"))
+        self.assertTrue(all("blucook#300@CHDBits" in path for path in renamed))
         self.assertTrue(all("Season 02" not in record["relative_path"] for record in package["files"]))
 
     def test_single_season_root_detection_distinguishes_multi_season_pack(self):

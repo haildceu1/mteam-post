@@ -2934,7 +2934,14 @@ def _prepare_folder(
         source = _canonical_source(source or hints.source or common_source) or ""
         if not source:
             raise ValueError(f"无法识别来源：{path.name}；请传 --source")
-        group = args.group if args.group is not None else (hints.group or common_group)
+        # A matched disc collection is one release.  Use the representative
+        # disc's normalized group for every disc instead of carrying a typo or
+        # shell-escaped spelling from one individual filename into the title.
+        group = (
+            args.group
+            if args.group is not None
+            else (common_group if disc_collection else (hints.group or common_group))
+        )
         platform = args.platform if args.platform is not None else (hints.platform or common_platform)
         country = hints.country or common_country
         media = MediaInfo(
