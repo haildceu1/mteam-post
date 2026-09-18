@@ -840,6 +840,12 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
             prepare_technical_info_mock.assert_called_once()
             read_mediainfo_mock.assert_called_once()
 
+            # Simulate a previous run that finished hashing and wrote the
+            # future path, but was denied when it tried to rename the root.
+            cached_payload = json.loads(package_path.read_text(encoding="utf-8"))
+            cached_payload["prepared_path"] = str(root.parent / "Example Show-2024-S01")
+            package_path.write_text(json.dumps(cached_payload), encoding="utf-8")
+
             prepare_technical_info_mock.reset_mock()
             read_mediainfo_mock.reset_mock()
             applied = prepare_main([*common, "--apply"])

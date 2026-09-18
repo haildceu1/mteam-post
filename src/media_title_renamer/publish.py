@@ -373,13 +373,27 @@ def main(argv: list[str] | None = None) -> None:
             payload = _load_package(package_path)
             target_filename = payload.get("target_filename")
             prepared_path = payload.get("prepared_path")
+            target_path = (
+                args.input.parent / target_filename
+                if isinstance(target_filename, str) and target_filename.strip()
+                else None
+            )
             needs_folder_apply = (
                 str(payload.get("kind") or "") == "tv"
                 and isinstance(target_filename, str)
                 and bool(target_filename.strip())
                 and isinstance(prepared_path, str)
-                and _normalised_path(prepared_path) == _normalised_path(args.input)
-                and target_filename.casefold() != args.input.name.casefold()
+                and (
+                    (
+                        _normalised_path(prepared_path) == _normalised_path(args.input)
+                        and target_filename.casefold() != args.input.name.casefold()
+                    )
+                    or (
+                        target_path is not None
+                        and _normalised_path(prepared_path) == _normalised_path(target_path)
+                        and not target_path.exists()
+                    )
+                )
             )
             # Packages made before the two-stage cache have no target fields;
             # run the normal prepare path so they are upgraded safely.

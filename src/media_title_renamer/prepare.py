@@ -2484,7 +2484,7 @@ def _cached_folder_prepare_package(root: Path) -> tuple[Path, dict[str, Any], Pa
             prepared_path = Path(str(payload.get("prepared_path") or "")).resolve()
         except (OSError, ValueError):
             continue
-        if input_path != wanted or prepared_path != wanted:
+        if input_path != wanted:
             continue
         target_name = str(payload.get("target_filename") or "").strip()
         torrent_root_name = str(payload.get("torrent_root_name") or "").strip()
@@ -2492,6 +2492,14 @@ def _cached_folder_prepare_package(root: Path) -> tuple[Path, dict[str, Any], Pa
             # Packages from versions before the two-stage flow used the old
             # root name inside the torrent and cannot safely be applied here.
             continue
+        target_root = root.parent / target_name
+        # A failed first apply writes the future prepared_path before trying
+        # the final directory rename.  If that target is still absent, the
+        # package is recoverable: all media hashes and the canonical torrent
+        # are already complete, so only the pending filesystem rename remains.
+        if prepared_path != wanted:
+            if not _same_path(prepared_path, target_root) or target_root.exists():
+                continue
         torrent = payload.get("torrent")
         torrent_path = Path(str(torrent.get("path") or "")) if isinstance(torrent, dict) else Path()
         if not torrent_path.is_file():
