@@ -2226,6 +2226,38 @@ def _douban_for_release(
                 if name and season_number is not None
             ],
         )
+        if not douban and season_number is not None:
+            # A limited series or anime may have only one series-level Douban
+            # subject.  Retry with bare names (without ``Season N``) and keep
+            # only an exact title/year match with no explicit season marker.
+            # This makes the fallback deterministic even when the suggest API
+            # returns unrelated ``Season 1`` entries first.
+            bare_names = [
+                name
+                for name in (
+                    tmdb.original_name if tmdb else "",
+                    tmdb.name if tmdb else "",
+                    tmdb.chinese_name if tmdb else "",
+                    title,
+                    base_title,
+                )
+                if name
+            ]
+            bare_candidates = _douban_candidates(bare_names, search_year)
+            expected_titles = [
+                name
+                for name in bare_names
+                if name
+            ]
+            series_candidates = [
+                item
+                for item in bare_candidates
+                if item.season_number is None
+                and item.year == search_year
+                and _douban_title_matches(item, expected_titles)
+            ]
+            if series_candidates:
+                douban = _choose_douban(series_candidates)
         if season_number is not None and not douban:
             print(
                 f"提示：未找到同时匹配当前剧名和第 {season_number} 季的豆瓣条目，"

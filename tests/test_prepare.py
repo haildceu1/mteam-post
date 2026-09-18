@@ -256,6 +256,43 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
             series,
         )
 
+    def test_douban_release_retries_bare_names_for_limited_series(self):
+        args = type("Args", (), {"douban_url": None, "offline": False})()
+        tmdb = TmdbMatch(
+            id=286617,
+            media_type="tv",
+            name="Tip Toe",
+            chinese_name="踮起脚尖",
+            original_name="Tip Toe",
+            original_language="en",
+            year="2026",
+            imdb_id="",
+            genre_ids=(),
+            score=100,
+        )
+        series = DoubanMatch(
+            "37235098",
+            "https://movie.douban.com/subject/37235098/",
+            "踮起脚尖",
+            "Tip Toe",
+            "2026",
+            100,
+            None,
+        )
+        with patch(
+            "media_title_renamer.prepare._douban_candidates",
+            side_effect=[[], [series]],
+        ):
+            result = _douban_for_release(
+                args,
+                tmdb=tmdb,
+                title="Tip Toe",
+                base_title="踮起脚尖",
+                year="2026",
+                season_number=1,
+            )
+        self.assertIs(result, series)
+
     def test_single_reasonable_douban_candidate_is_accepted_without_prompt(self):
         candidate = DoubanMatch(
             "3271362",
