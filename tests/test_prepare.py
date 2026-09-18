@@ -29,6 +29,7 @@ from media_title_renamer.prepare import (
     _resume_tmdb_id_for_folder,
     _read_initial_iso_media,
     _series_folder_name,
+    _season_number,
     _season_numbers_in_text,
     _strip_tv_disc_tokens,
     _torrent_file_specs,
@@ -57,6 +58,17 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_jojo_part_subtitles_supply_missing_season_numbers(self):
+        self.assertEqual(
+            _season_number("JoJo's.Bizarre.Adventure.Gold.Experience.2018.D01"),
+            4,
+        )
+        self.assertEqual(
+            _season_number("JoJo.no.Kimyou.na.Bouken.Stone.Ocean.2021.D01"),
+            5,
+        )
+        self.assertIsNone(_season_number("Gold.Experience.2018.D01"))
+
     def test_disc_style_season_and_disc_tokens_are_removed_from_fallback_title(self):
         self.assertEqual(
             _strip_tv_disc_tokens("JoJo no Kimyou na Bouken Season2 Disc1"),
@@ -77,6 +89,21 @@ class PrepareTests(unittest.TestCase):
         self.assertIsNotNone(collection)
         assert collection is not None
         self.assertEqual({path.name for path in collection[1]}, {selected.name, same_season.name})
+
+    def test_jojo_disc_collection_uses_part_subtitle_to_separate_seasons(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "JoJo's.Bizarre.Adventure.Gold.Experience.2018.D01.BluRay.iso"
+            same_part = root / "JoJo's.Bizarre.Adventure.Gold.Experience.2018.D02.BluRay.iso"
+            other_part = root / "JoJo's.Bizarre.Adventure.Stone.Ocean.2021.D01.BluRay.iso"
+            for path in (selected, same_part, other_part):
+                path.write_bytes(b"iso")
+
+            collection = _matching_tv_disc_isos(selected)
+
+        self.assertIsNotNone(collection)
+        assert collection is not None
+        self.assertEqual({path.name for path in collection[1]}, {selected.name, same_part.name})
 
     @patch("media_title_renamer.prepare.prepare_technical_info")
     def test_single_disc_iso_prepare_moves_only_same_season_collection(self, prepare_technical_info_mock):

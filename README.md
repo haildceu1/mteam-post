@@ -334,6 +334,8 @@ media-title-rename prepare "F:\TV\The Office" --apply
 
 分碟文件名中的 `Season2`、`Disc1`、`S02D01` 等身份标记只用于识别季碟号，不会再被重复写入剧名；像 `blucook#300\@CHDBits` 这样的发布组写法也会统一规范为 `blucook#300@CHDBits`。如果输出提示“未获得 TMDB ID”，表示没有配置 `TMDB_READ_ACCESS_TOKEN`/`TMDB_API_KEY` 且没有传 `--tmdb-id`，并不代表分碟匹配失败；JoJo 这组可以显式添加 `--tmdb-id 45790`。
 
+JoJo 动画分碟有时只有 `D01`、`D02` 等碟号，没有 `Sxx`，程序会根据篇章副标题补全季号：`Stardust Crusaders`/`星尘斗士` 为 S02、`Diamond Is Unbreakable`/`不灭钻石` 为 S03、`Gold Experience`/`Golden Wind`/`黄金之风` 为 S04、`Stone Ocean`/`石之海` 为 S05；只有文件名同时包含 JoJo 标识时才启用该回退规则，避免误判普通片名。这样同目录的其它篇章分碟不会被混入当前季。
+
 ### TMDB 名称增强
 
 申请 TMDB API Read Access Token 后，在当前 PowerShell 会话中配置：

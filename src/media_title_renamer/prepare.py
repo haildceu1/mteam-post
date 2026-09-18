@@ -1901,6 +1901,32 @@ def _number_token(value: str) -> int | None:
     return None
 
 
+_JOJO_PART_SEASONS: tuple[tuple[int, tuple[str, ...]], ...] = (
+    (1, ("phantom blood", "battle tendency", "幻影之血", "战斗潮流")),
+    (2, ("stardust crusaders", "星尘斗士", "星尘十字军")),
+    (3, ("diamond is unbreakable", "不灭钻石", "钻石不灭")),
+    (4, ("gold experience", "golden wind", "vento aureo", "黄金之风", "黄金体验")),
+    (5, ("stone ocean", "石之海")),
+)
+
+
+def _jojo_part_season(value: str) -> int | None:
+    """Infer the TV season from a JoJo anime part subtitle.
+
+    Scene/disc names for JoJo releases often contain only ``D01`` and the
+    story-arc subtitle (for example ``Gold.Experience``), without an explicit
+    ``S04`` marker.  Restrict this fallback to JoJo names so ordinary titles
+    containing words such as ``Stone`` or ``Gold`` are never assigned a season.
+    """
+    if not re.search(r"\bjojo(?:'s)?\b|jojo\s+no\s+kimyou|奇妙冒险|奇妙な冒険", value, re.I):
+        return None
+    lowered = value.casefold().replace("_", " ").replace(".", " ")
+    for season, aliases in _JOJO_PART_SEASONS:
+        if any(alias.casefold() in lowered for alias in aliases):
+            return season
+    return None
+
+
 def _season_number(value: str) -> int | None:
     chinese = re.search(r"第\s*([0-9零〇一二两兩三四五六七八九十]+)\s*季", value, re.I)
     if chinese:
@@ -1913,7 +1939,9 @@ def _season_number(value: str) -> int | None:
         value,
         re.I,
     )
-    return int(western.group(1)) if western else None
+    if western:
+        return int(western.group(1))
+    return _jojo_part_season(value)
 
 
 def _disc_number(value: str) -> int | None:
