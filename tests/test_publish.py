@@ -99,6 +99,36 @@ class PublishTests(unittest.TestCase):
 
     @patch("media_title_renamer.publish.mteam_fill_main")
     @patch("media_title_renamer.publish.prepare_main")
+    def test_reused_folder_package_with_apply_uses_cached_rename_plan(
+        self, prepare_main, mteam_fill_main
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Example Show"
+            root.mkdir()
+            prepare_dir = Path(directory) / "Example Show 2024 S01.prepare"
+            prepare_dir.mkdir()
+            package = prepare_dir / "mteam-prepare.json"
+            package.write_text(
+                json.dumps(
+                    {
+                        "input_path": str(root),
+                        "prepared_path": str(root),
+                        "target_filename": "Example Show-2024-S01",
+                        "kind": "tv",
+                        "created_at": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            prepare_main.return_value = package
+
+            publish.main([str(root), "--apply", "--yes", "--no-upload"])
+
+        prepare_main.assert_called_once_with([str(root), "--apply", "--yes"])
+        self.assertEqual(mteam_fill_main.call_args.args[0][0], str(package.resolve()))
+
+    @patch("media_title_renamer.publish.mteam_fill_main")
+    @patch("media_title_renamer.publish.prepare_main")
     def test_refresh_prepare_ignores_existing_package(self, prepare_main, mteam_fill_main) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "Movie.mkv"

@@ -2468,11 +2468,161 @@ def _print_folder_rename_preview(
         print(f"  {source} {marker} {target}")
 
 
+def _cached_folder_prepare_package(root: Path) -> tuple[Path, dict[str, Any], Path] | None:
+    """Find a complete no-apply folder package whose rename plan is reusable."""
+    wanted = root.resolve()
+    candidates: list[tuple[int, int, Path, dict[str, Any], Path]] = []
+    for package_path in root.parent.glob("*.prepare/mteam-prepare.json"):
+        try:
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or payload.get("kind") != "tv":
+            continue
+        try:
+            input_path = Path(str(payload.get("input_path") or "")).resolve()
+            prepared_path = Path(str(payload.get("prepared_path") or "")).resolve()
+        except (OSError, ValueError):
+            continue
+        if input_path != wanted or prepared_path != wanted:
+            continue
+        target_name = str(payload.get("target_filename") or "").strip()
+        torrent_root_name = str(payload.get("torrent_root_name") or "").strip()
+        if not target_name or target_name != torrent_root_name:
+            # Packages from versions before the two-stage flow used the old
+            # root name inside the torrent and cannot safely be applied here.
+            continue
+        torrent = payload.get("torrent")
+        torrent_path = Path(str(torrent.get("path") or "")) if isinstance(torrent, dict) else Path()
+        if not torrent_path.is_file():
+            continue
+        records = payload.get("files")
+        if not isinstance(records, list) or not records:
+            continue
+        valid = True
+        for record in records:
+            if not isinstance(record, dict):
+                valid = False
+                break
+            source = Path(str(record.get("source_path") or ""))
+            relative = Path(str(record.get("relative_path") or ""))
+            try:
+                source.resolve().relative_to(wanted)
+            except (OSError, ValueError):
+                valid = False
+                break
+            if not source.is_file() or relative.is_absolute() or ".." in relative.parts:
+                valid = False
+                break
+        if not valid:
+            continue
+        try:
+            stamp = int(payload.get("created_at") or 0)
+            mtime = package_path.stat().st_mtime_ns
+        except OSError:
+            continue
+        candidates.append((stamp, mtime, package_path, payload, torrent_path))
+    if not candidates:
+        return None
+    _stamp, _mtime, package_path, payload, torrent_path = max(candidates, key=lambda item: (item[0], item[1]))
+    return package_path, payload, torrent_path
+
+
+def _apply_cached_folder_prepare(
+    args: argparse.Namespace,
+    root: Path,
+    cached: tuple[Path, dict[str, Any], Path],
+) -> Path | None:
+    package_path, payload, _torrent_path = cached
+    target_root = root.parent / str(payload["target_filename"])
+    records = payload["files"]
+    pairs: list[tuple[Path, Path, Path]] = []
+    for record in records:
+        source = Path(str(record["source_path"]))
+        relative = Path(str(record["relative_path"]))
+        final_target = target_root / relative
+        # Move files within the current root first.  Creating target_root
+        # before root.rename() would make Windows reject the directory move.
+        apply_target = root / relative
+        pairs.append((source, apply_target, final_target))
+    if target_root.exists() and not _same_path(root, target_root):
+        raise FileExistsError(f"目标剧集目录已存在，未执行任何改名：{target_root}")
+    conflicts = [
+        final_target
+        for source, _apply_target, final_target in pairs
+        if final_target.exists() and not _same_path(source, final_target)
+    ]
+    if conflicts:
+        raise FileExistsError("目标文件已存在，未执行任何改名：" + "；".join(str(path) for path in conflicts))
+
+    print(f"正在复用现有重命名计划：{package_path}")
+    print("已跳过媒体探测、截图生成和种子哈希。")
+    print("\n重命名格式预览：")
+    if not _same_path(root, target_root):
+        print(f"  剧集目录：{root.name} → {target_root.name}")
+    for source, _apply_target, final_target in pairs:
+        relative_source = source.relative_to(root)
+        relative_target = final_target.relative_to(target_root if not _same_path(root, target_root) else root)
+        print(f"  {relative_source} → {relative_target}")
+    if not _confirm_rename_preview(
+        needs_rename=(
+            not _same_path(root, target_root)
+            or any(
+                not _same_path(source, apply_target)
+                for source, apply_target, _final_target in pairs
+            )
+        ),
+        skip_confirmation=args.yes,
+    ):
+        return None
+
+    completed: list[tuple[Path, Path]] = []
+    created: list[Path] = []
+    root_renamed = False
+    try:
+        for source, apply_target, _final_target in pairs:
+            if _same_path(source, apply_target):
+                continue
+            if not apply_target.parent.exists():
+                apply_target.parent.mkdir(parents=True, exist_ok=True)
+                created.append(apply_target.parent)
+            source.rename(apply_target)
+            completed.append((source, apply_target))
+        if not _same_path(root, target_root):
+            root.rename(target_root)
+            root_renamed = True
+    except OSError as exc:
+        if root_renamed and target_root.exists() and not root.exists():
+            target_root.rename(root)
+        for source, target in reversed(completed):
+            if target.exists() and not source.exists():
+                target.rename(source)
+        for directory in reversed(created):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        raise RuntimeError(f"应用缓存重命名计划失败：{exc}") from exc
+
+    payload["prepared_path"] = str(target_root)
+    payload["filename"] = target_root.name
+    for record, (_source, _apply_target, final_target) in zip(records, pairs):
+        record["prepared_path"] = str(final_target)
+        record["target_path"] = str(final_target)
+    package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"已应用缓存重命名计划；资料包和种子保持可用：{package_path}")
+    return package_path
+
+
 def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     if args.kind == "movie":
         raise ValueError("文件夹模式用于剧集，--kind 不能设为 movie")
     if args.episode:
         raise ValueError("文件夹模式会从每个文件名识别季集，请不要传 --episode")
+    if args.apply:
+        cached = _cached_folder_prepare_package(root)
+        if cached is not None:
+            return _apply_cached_folder_prepare(args, root, cached)
     embedded_tmdb_id = _embedded_tmdb_id(root)
     if args.tmdb_id is None and embedded_tmdb_id is not None:
         args = argparse.Namespace(**vars(args))
@@ -2749,6 +2899,7 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
             {
                 "source_path": str(plan.source_path),
                 "prepared_path": str(final_prepared_path),
+                "target_path": str(target_root / plan.logical_path),
                 "filename": plan.target_path.name,
                 "relative_path": str(plan.logical_path),
                 "episode": plan.episode,
@@ -2778,12 +2929,15 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
 
     torrent_path = output_dir / f"{pack_title}.torrent"
     piece_length = 0
+    # The torrent always records the future canonical root name.  This makes
+    # a later ``prepare --apply`` able to apply the cached rename plan without
+    # hashing the media a second time.
+    torrent_root_name = target_root.name
     if not args.skip_torrent:
         torrent_files = sorted(
             ((plan.source_path, plan.logical_path) for plan in provisional),
             key=lambda item: str(item[1]).casefold(),
         )
-        torrent_root_name = target_root.name if args.apply else root.name
         piece_length = create_private_v1_folder_torrent(root, torrent_files, torrent_path, torrent_root_name)
 
     imdb_url = f"https://www.imdb.com/title/{tmdb.imdb_id}/" if tmdb and tmdb.imdb_id else ""
@@ -2792,6 +2946,9 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
         "created_at": int(time.time()),
         "input_path": str(root),
         "prepared_path": str(target_root if args.apply else root),
+        "target_prepared_path": str(target_root),
+        "target_filename": target_root.name,
+        "torrent_root_name": torrent_root_name,
         "release_name": pack_title,
         "filename": target_root.name if args.apply else root.name,
         "kind": "tv",

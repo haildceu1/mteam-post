@@ -364,7 +364,42 @@ def main(argv: list[str] | None = None) -> None:
                 "复用现有资料包时不能再传 prepare 参数：" + " ".join(unsupported)
             )
         renamed = False
-        if not direct_package and "--apply" in prepare_options:
+        if not direct_package and "--apply" in prepare_options and args.input.is_dir():
+            # A folder package made by ``prepare`` without ``--apply`` has
+            # already paid the MediaInfo/screenshot/torrent cost, but its
+            # source tree is still under the original root.  Let prepare's
+            # cache path apply that recorded plan; it will not re-probe or
+            # re-hash.  Already-applied packages are left untouched.
+            payload = _load_package(package_path)
+            target_filename = payload.get("target_filename")
+            prepared_path = payload.get("prepared_path")
+            needs_folder_apply = (
+                str(payload.get("kind") or "") == "tv"
+                and isinstance(target_filename, str)
+                and bool(target_filename.strip())
+                and isinstance(prepared_path, str)
+                and _normalised_path(prepared_path) == _normalised_path(args.input)
+                and target_filename.casefold() != args.input.name.casefold()
+            )
+            # Packages made before the two-stage cache have no target fields;
+            # run the normal prepare path so they are upgraded safely.
+            if needs_folder_apply or (
+                str(payload.get("kind") or "") == "tv"
+                and "target_filename" not in payload
+            ):
+                generation_options = ["--apply"]
+                if args.yes:
+                    generation_options.append("--yes")
+                try:
+                    applied_package = prepare_main([str(args.input), *generation_options])
+                except (FileExistsError, OSError, RuntimeError, ValueError) as exc:
+                    parser.error(str(exc))
+                if applied_package is None:
+                    print("已取消重命名；未继续填写 M-Team 发布页。")
+                    return
+                package_path = Path(applied_package).resolve()
+                renamed = True
+        elif not direct_package and "--apply" in prepare_options:
             try:
                 renamed = _apply_reused_single_file_rename(
                     package_path,

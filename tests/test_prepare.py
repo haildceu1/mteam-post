@@ -791,6 +791,67 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
             ],
         )
 
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    def test_apply_reuses_no_apply_folder_package_without_rehashing(
+        self, read_mediainfo_mock, prepare_technical_info_mock
+    ):
+        media = MediaInfo(
+            width=1920,
+            height=1080,
+            resolution="1080p",
+            video_format="AVC",
+            writing_library="",
+            video_codec="AVC",
+            hdr=(),
+            hfr=None,
+            audio_codec="DD",
+            audio_channels="5.1",
+            audio_tracks=1,
+            audio_bitrate=640000,
+            audio_language="en",
+        )
+        read_mediainfo_mock.return_value = media
+        prepare_technical_info_mock.return_value = (
+            "MediaInfo",
+            "General\nComplete name : example.mkv\n",
+            Path("temporary-mediainfo.txt"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Example Show"
+            root.mkdir()
+            (root / "Example.Show.S01E01.mkv").write_bytes(b"one")
+            (root / "Example.Show.S01E02.mkv").write_bytes(b"two")
+            common = [
+                str(root),
+                "--title",
+                "Example Show",
+                "--year",
+                "2024",
+                "--source",
+                "HDTV",
+                "--offline",
+                "--skip-screenshots",
+                "--yes",
+            ]
+            package_path = prepare_main(common)
+            self.assertIsNotNone(package_path)
+            prepare_technical_info_mock.assert_called_once()
+            read_mediainfo_mock.assert_called_once()
+
+            prepare_technical_info_mock.reset_mock()
+            read_mediainfo_mock.reset_mock()
+            applied = prepare_main([*common, "--apply"])
+            self.assertEqual(applied, package_path)
+            prepare_technical_info_mock.assert_not_called()
+            read_mediainfo_mock.assert_not_called()
+            renamed_root = root.parent / "Example Show-2024-S01"
+            self.assertTrue((renamed_root / "Season 01" / "Example Show 2024 S01E01 1080p HDTV H.264 DD5.1.mkv").is_file())
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["prepared_path"], str(renamed_root))
+            self.assertEqual(payload["torrent_root_name"], renamed_root.name)
+
     @patch("random_video_screenshots.cli.extract_screenshots")
     def test_screenshot_result_excludes_stale_files(self, extract_screenshots):
         def create_new_file(_video, output, *, count):
