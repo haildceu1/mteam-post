@@ -1904,9 +1904,9 @@ def _number_token(value: str) -> int | None:
 _JOJO_PART_SEASONS: tuple[tuple[int, tuple[str, ...]], ...] = (
     (1, ("phantom blood", "battle tendency", "幻影之血", "战斗潮流")),
     (2, ("stardust crusaders", "星尘斗士", "星尘十字军")),
-    (3, ("diamond is unbreakable", "不灭钻石", "钻石不灭")),
-    (4, ("gold experience", "golden wind", "vento aureo", "黄金之风", "黄金体验")),
-    (5, ("stone ocean", "石之海")),
+    (4, ("diamond is unbreakable", "不灭钻石", "钻石不灭")),
+    (5, ("gold experience", "golden wind", "vento aureo", "黄金之风", "黄金体验")),
+    (6, ("stone ocean", "石之海")),
 )
 
 

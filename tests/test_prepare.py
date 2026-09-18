@@ -61,11 +61,11 @@ class PrepareTests(unittest.TestCase):
     def test_jojo_part_subtitles_supply_missing_season_numbers(self):
         self.assertEqual(
             _season_number("JoJo's.Bizarre.Adventure.Gold.Experience.2018.D01"),
-            4,
+            5,
         )
         self.assertEqual(
             _season_number("JoJo.no.Kimyou.na.Bouken.Stone.Ocean.2021.D01"),
-            5,
+            6,
         )
         self.assertIsNone(_season_number("Gold.Experience.2018.D01"))
 
