@@ -17,6 +17,7 @@ from media_title_renamer.prepare import (
     _disc_episode,
     _clean_disc_marker_from_edition,
     _choose_douban,
+    _confirm_rename_preview,
     _douban_search_page_candidates,
     _douban_candidates,
     _douban_for_release,
@@ -53,6 +54,18 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_rename_preview_confirmation_accepts_yes_and_rejects_other_answers(self):
+        with (
+            patch("media_title_renamer.prepare.sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="n"),
+        ):
+            self.assertFalse(_confirm_rename_preview(needs_rename=True))
+        with (
+            patch("media_title_renamer.prepare.sys.stdin.isatty", return_value=True),
+            patch("builtins.input", return_value="y"),
+        ):
+            self.assertTrue(_confirm_rename_preview(needs_rename=True))
+
     def test_douban_empty_success_response_is_reported_as_possible_throttle(self):
         diagnostics: list[str] = []
         with patch("media_title_renamer.prepare._get_json", return_value=[]):
@@ -635,6 +648,7 @@ English
                         "https://movie.douban.com/subject/1/",
                         "--skip-screenshots",
                         "--apply",
+                        "--yes",
                     ]
                 )
             package = json.loads(package_path.read_text(encoding="utf-8"))
@@ -707,6 +721,7 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
                         "--skip-screenshots",
                         "--skip-torrent",
                         "--apply",
+                        "--yes",
                     ]
                 )
             package = json.loads(package_path.read_text(encoding="utf-8"))
@@ -763,6 +778,7 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
                         "--skip-screenshots",
                         "--skip-torrent",
                         "--apply",
+                        "--yes",
                     ]
                 )
             renamed_files = sorted(path.name for path in root.rglob("*.iso"))
@@ -834,6 +850,7 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
                         "--skip-screenshots",
                         "--skip-torrent",
                         "--apply",
+                        "--yes",
                     ]
                 )
             package = json.loads(package_path.read_text(encoding="utf-8"))

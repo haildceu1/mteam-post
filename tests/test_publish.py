@@ -81,6 +81,7 @@ class PublishTests(unittest.TestCase):
                 [
                     str(source),
                     "--apply",
+                    "--yes",
                     "--no-upload",
                     "--profile-dir",
                     r"C:\Profiles\mteam",
@@ -173,6 +174,7 @@ class PublishTests(unittest.TestCase):
                     "--refresh-prepare",
                     "--reuse-torrent",
                     "--apply",
+                    "--yes",
                     "--no-upload",
                     "--profile-dir",
                     r"C:\Profiles\mteam",

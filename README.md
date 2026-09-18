@@ -114,7 +114,7 @@ media-title-rename publish "F:\TV\20.22" `
   --keep-open
 ```
 
-单个视频或 ISO 只需替换输入路径。该命令会完成重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介，并在简介末尾自动回车两次后追加截图。填写/上传前输入 `y` 确认，最后检查页面并手工点击“发布”。`publish` 会先读取环境变量 `MTEAM_PROFILE_DIR`；未设置时，Windows 优先复用本机已有的 `D:\Cinema\mteam`，否则使用 `%LOCALAPPDATA%\mteam-post\chrome-profile`，Ubuntu 使用 `${XDG_CONFIG_HOME:-$HOME/.config}/mteam-post/chrome-profile`。通常无需再写 `--profile-dir`，仍可用该参数临时覆盖。
+单个视频或 ISO 只需替换输入路径。该命令会先列出原文件到规范文件名的重命名预览，并在交互终端中询问确认；确认后才会继续重命名、MediaInfo（蓝光 ISO 使用 BDInfo）、4 张截图、V1 私有种子、IMDb/豆瓣链接、分类和简介。简介末尾会自动回车两次后追加截图。填写/上传前还会再次询问，最后检查页面并手工点击“发布”。`publish` 会先读取环境变量 `MTEAM_PROFILE_DIR`；未设置时，Windows 优先复用本机已有的 `D:\Cinema\mteam`，否则使用 `%LOCALAPPDATA%\mteam-post\chrome-profile`，Ubuntu 使用 `${XDG_CONFIG_HOME:-$HOME/.config}/mteam-post/chrome-profile`。通常无需再写 `--profile-dir`，仍可用该参数临时覆盖。自动化或确认无误时可加 `--yes`，跳过重命名预览和发布页写入前的确认。
 
 升级项目时执行：
 
@@ -272,7 +272,7 @@ media-title-rename "D:\Movie\Sympathy for Mr Vengeance 2002 4K BluRay x265 DTS-H
 
 ## 准备 M-Team 发布资料
 
-`prepare` 会在媒体文件旁创建一个 `.prepare` 目录，默认生成：
+`prepare` 会先显示重命名格式预览；交互运行 `--apply` 时，输入 `y` 才会真正改名，输入其他内容则停止且不制作种子。需要在脚本中跳过该确认时可加 `--yes`。随后会在媒体文件旁创建一个 `.prepare` 目录，默认生成：
 
 - M-Team 规范标题与分类
 - 中文名、原文名和源语言组成的副标题

@@ -1825,6 +1825,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="生成 M-Team 发布资料包、V1 私有种子、MediaInfo/BDInfo Text 和 4 张截图")
     parser.add_argument("input", type=Path, help="单个视频/ISO，或剧集所在文件夹")
     parser.add_argument("--apply", action="store_true", help="资料准备成功后执行规范重命名")
+    parser.add_argument("--yes", action="store_true", help="跳过重命名格式预览确认")
     parser.add_argument("--recursive", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, help="资料包输出目录；默认在媒体旁创建 .prepare 文件夹")
     parser.add_argument("--title", help="手工指定主标题，并优先于 TMDB")
@@ -2437,6 +2438,36 @@ def _apply_folder_renames(
         raise RuntimeError(f"批量改名失败：{exc}{detail}") from exc
 
 
+def _confirm_rename_preview(*, needs_rename: bool, skip_confirmation: bool = False) -> bool:
+    """Ask before applying a calculated rename plan in an interactive shell."""
+    if not needs_rename or skip_confirmation or not sys.stdin.isatty():
+        return True
+    try:
+        answer = input("确认按以上预览执行重命名？[y/N]: ").strip().casefold()
+    except EOFError:
+        answer = ""
+    if answer in {"y", "yes", "是", "确认"}:
+        return True
+    print("已取消重命名；未修改源文件，也未继续制作种子。")
+    return False
+
+
+def _print_folder_rename_preview(
+    plans: list[FolderPlan],
+    *,
+    root: Path,
+    target_root: Path,
+) -> None:
+    print("\n重命名格式预览：")
+    if not _same_path(root, target_root):
+        print(f"  剧集目录：{root.name} → {target_root.name}")
+    for plan in plans:
+        source = plan.source_path.relative_to(root)
+        target = plan.target_path.relative_to(root)
+        marker = "=" if source == target else "→"
+        print(f"  {source} {marker} {target}")
+
+
 def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     if args.kind == "movie":
         raise ValueError("文件夹模式用于剧集，--kind 不能设为 movie")
@@ -2626,6 +2657,16 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     if conflicts:
         raise FileExistsError("目标文件已存在，未执行任何改名：" + "；".join(str(path) for path in conflicts))
 
+    _print_folder_rename_preview(provisional, root=root, target_root=target_root)
+    if args.apply and not _confirm_rename_preview(
+        needs_rename=(
+            not _same_path(root, target_root)
+            or any(plan.source_path != plan.target_path for plan in provisional)
+        ),
+        skip_confirmation=args.yes,
+    ):
+        return None
+
     representative = provisional[0]
     pack_title = build_title(
         title=title,
@@ -2793,12 +2834,6 @@ def _prepare_folder(args: argparse.Namespace, root: Path) -> Path:
     package_path = output_dir / "mteam-prepare.json"
     package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print("\n剧集文件名预检完成：")
-    for plan in provisional:
-        relative_source = plan.source_path.relative_to(root)
-        relative_target = plan.target_path.relative_to(root)
-        marker = "=" if relative_source == relative_target else "→"
-        print(f"  {relative_source} {marker} {relative_target}")
     if args.apply:
         _apply_folder_renames(provisional, root=root, target_root=target_root)
 
@@ -2888,6 +2923,15 @@ def main(argv: list[str] | None = None) -> Path | None:
         target = path.with_name(release_title + path.suffix.lower())
         if args.apply and target.exists() and target != path:
             raise FileExistsError(f"目标文件已存在：{target}")
+
+        print("\n重命名格式预览：")
+        marker = "=" if target == path else "→"
+        print(f"  {path.name} {marker} {target.name}")
+        if args.apply and not _confirm_rename_preview(
+            needs_rename=target != path,
+            skip_confirmation=args.yes,
+        ):
+            return None
 
         douban = _douban_for_release(
             args,

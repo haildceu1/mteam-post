@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from .mteam_fill import main as mteam_fill_main
-from .prepare import main as prepare_main
+from .prepare import _confirm_rename_preview, main as prepare_main
 
 
 def _default_profile_dir() -> Path:
@@ -120,7 +120,12 @@ def _find_existing_package(input_path: Path) -> Path:
     return max(matches, key=lambda item: (item[0], item[1]))[2]
 
 
-def _apply_reused_single_file_rename(package_path: Path, input_path: Path) -> bool:
+def _apply_reused_single_file_rename(
+    package_path: Path,
+    input_path: Path,
+    *,
+    skip_confirmation: bool = False,
+) -> bool:
     """Apply a reused package's canonical name to one source file.
 
     ``prepare`` can be run without ``--apply`` to inspect and build all
@@ -158,6 +163,11 @@ def _apply_reused_single_file_rename(package_path: Path, input_path: Path) -> bo
         return False
     if target.exists():
         raise FileExistsError(f"目标文件已存在：{target}")
+
+    print("\n重命名格式预览：")
+    print(f"  {input_path.name} → {target.name}")
+    if not _confirm_rename_preview(needs_rename=True, skip_confirmation=skip_confirmation):
+        raise ValueError("已取消重命名；未修改源文件，也未继续填写发布页。")
 
     input_path.rename(target)
     payload["prepared_path"] = str(target)
@@ -257,6 +267,8 @@ def _refresh_with_reused_torrent(
             )
 
     generation_options = [option for option in prepare_options if option != "--apply"]
+    if args.yes:
+        generation_options.append("--yes")
     generation_options.extend(["--skip-torrent", "--output", str(package_path.parent)])
     generated = prepare_main([str(source), *generation_options])
     if generated is None:
@@ -286,7 +298,11 @@ def _refresh_with_reused_torrent(
 
     renamed = False
     if apply_requested and source.is_file():
-        renamed = _apply_reused_single_file_rename(generated_path, source)
+        renamed = _apply_reused_single_file_rename(
+            generated_path,
+            source,
+            skip_confirmation=args.yes,
+        )
         if renamed:
             refreshed = _load_package(generated_path)
             refreshed["torrent"] = old_torrent
@@ -350,7 +366,11 @@ def main(argv: list[str] | None = None) -> None:
         renamed = False
         if not direct_package and "--apply" in prepare_options:
             try:
-                renamed = _apply_reused_single_file_rename(package_path, args.input)
+                renamed = _apply_reused_single_file_rename(
+                    package_path,
+                    args.input,
+                    skip_confirmation=args.yes,
+                )
             except (FileExistsError, OSError, ValueError) as exc:
                 parser.error(str(exc))
         print(f"正在复用现有发布资料包：{package_path}")
@@ -364,9 +384,13 @@ def main(argv: list[str] | None = None) -> None:
         # that no longer matches the files left on disk.
         if "--apply" not in prepare_options:
             parser.error("publish 为保证种子与文件名一致，必须传入 --apply")
-        package_path = prepare_main([str(args.input), *prepare_options])
+        generation_options = list(prepare_options)
+        if args.yes:
+            generation_options.append("--yes")
+        package_path = prepare_main([str(args.input), *generation_options])
         if package_path is None:
-            raise RuntimeError("prepare 未返回 M-Team 发布资料包")
+            print("已取消重命名；未继续填写 M-Team 发布页。")
+            return
 
     fill_args = [str(package_path)]
     fill_args.extend(["--profile-dir", str(args.profile_dir)])
