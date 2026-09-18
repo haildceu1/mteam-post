@@ -1,9 +1,11 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from media_title_renamer.mteam_fill import (
     _append_editor_image_spacing,
+    _configure_chrome_options,
     _has_mteam_auth,
     _is_login_url,
     _parser,
@@ -14,6 +16,22 @@ from media_title_renamer.mteam_fill import (
 
 
 class MTeamFillTests(unittest.TestCase):
+    def test_chrome_options_add_server_compatibility_flags(self):
+        class Options:
+            def __init__(self):
+                self.arguments = []
+
+            def add_argument(self, value):
+                self.arguments.append(value)
+
+        with patch("media_title_renamer.mteam_fill.os.geteuid", return_value=0, create=True), patch(
+            "media_title_renamer.mteam_fill.os.name", "posix"
+        ), patch.dict("media_title_renamer.mteam_fill.os.environ", {}, clear=True):
+            options = _configure_chrome_options(Options())
+        self.assertIn("--no-sandbox", options.arguments)
+        self.assertIn("--disable-dev-shm-usage", options.arguments)
+        self.assertIn("--headless=new", options.arguments)
+
     def test_two_enters_are_inserted_before_editor_images(self):
         class Editor:
             def __init__(self):

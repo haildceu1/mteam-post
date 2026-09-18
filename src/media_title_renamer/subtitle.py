@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .mteam_fill import (
     MTeamSession,
+    _configure_chrome_options,
     _has_mteam_auth,
     _load_selenium,
     _origin,
@@ -438,7 +439,7 @@ def subtitle_main(argv: list[str] | None = None) -> None:
 
         session = load_mteam_session(args.cookie_file) if args.cookie_file else MTeamSession()
         webdriver = _load_selenium()
-        options = webdriver.ChromeOptions()
+        options = _configure_chrome_options(webdriver.ChromeOptions())
         if args.profile_dir:
             options.add_argument(f"--user-data-dir={args.profile_dir.resolve()}")
         driver = webdriver.Chrome(options=options)

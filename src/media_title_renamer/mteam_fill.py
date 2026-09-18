@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -478,6 +479,22 @@ def _load_selenium():
     return webdriver
 
 
+def _configure_chrome_options(options):
+    """Make ChromeDriver usable on Linux servers and under root."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        options.add_argument("--no-sandbox")
+    # Small /dev/shm partitions can make Chrome exit before creating a session.
+    options.add_argument("--disable-dev-shm-usage")
+    # SSH/container sessions often have no X/Wayland display. Keep desktop
+    # sessions visible, but use the modern headless backend when none exists.
+    if os.name != "nt" and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    ):
+        options.add_argument("--headless=new")
+        options.add_argument("--disable-gpu")
+    return options
+
+
 def _fill_page(driver, package: dict[str, object], *, upload: bool) -> None:
     _fill_field(driver, ("标题", "title"), str(package.get("title") or package.get("release_name") or ""), "标题")
     _fill_field(driver, ("副标题", "subtitle"), str(package.get("subtitle") or ""), "副标题")
@@ -591,7 +608,7 @@ def main(argv: list[str] | None = None) -> None:
         package = json.loads(args.package.read_text(encoding="utf-8")) if args.package else {}
         session = load_mteam_session(args.session_file) if args.session_file else MTeamSession()
         webdriver = _load_selenium()
-        options = webdriver.ChromeOptions()
+        options = _configure_chrome_options(webdriver.ChromeOptions())
         if args.profile_dir:
             options.add_argument(f"--user-data-dir={args.profile_dir.resolve()}")
         driver = webdriver.Chrome(options=options)
