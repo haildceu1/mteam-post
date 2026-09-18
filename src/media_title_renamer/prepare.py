@@ -454,6 +454,14 @@ def _choose_douban(
 ) -> DoubanMatch | None:
     if expected_season is not None:
         season_matches = [item for item in candidates if item.season_number == expected_season]
+        if expected_titles:
+            # Filter the season candidates by series identity before deciding
+            # whether a season-specific result exists.  Search results often
+            # contain unrelated shows with the same season number; keeping
+            # them here would prevent the safe series-level fallback below.
+            season_matches = [
+                item for item in season_matches if _douban_title_matches(item, expected_titles)
+            ]
         if season_matches:
             candidates = season_matches
         else:

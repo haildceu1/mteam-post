@@ -236,6 +236,26 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
             series,
         )
 
+    def test_douban_selection_ignores_unrelated_same_season_before_series_fallback(self):
+        unrelated = DoubanMatch("1", "", "狂怒追缉 第一季", "Furious Season 1", "2026", 47, 1)
+        series = DoubanMatch(
+            "11498785",
+            "https://movie.douban.com/subject/11498785/",
+            "踮起脚尖",
+            "Tip Toe",
+            "2026",
+            100,
+            None,
+        )
+        self.assertIs(
+            _choose_douban(
+                [unrelated, series],
+                expected_season=1,
+                expected_titles=["Tip Toe", "踮起脚尖"],
+            ),
+            series,
+        )
+
     def test_single_reasonable_douban_candidate_is_accepted_without_prompt(self):
         candidate = DoubanMatch(
             "3271362",
