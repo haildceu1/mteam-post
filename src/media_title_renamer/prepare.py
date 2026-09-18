@@ -2012,6 +2012,20 @@ def _clean_disc_marker_from_edition(value: str | None) -> str | None:
     return cleaned or None
 
 
+def _strip_tv_disc_tokens(value: str) -> str:
+    """Remove season/disc identity tokens accidentally included in a title."""
+    cleaned = value
+    patterns = (
+        r"\bS\d{1,2}D\d{1,2}\b",
+        r"\b(?:SEASON|S)\s*0*\d{1,2}\b",
+        r"\b(?:DISC|DISK|VOL(?:UME)?|D)\s*0*\d{1,2}\b",
+        r"第\s*[0-9零〇一二两兩三四五六七八九十]+\s*(?:季|碟|盘|盤|张|張)",
+    )
+    for pattern in patterns:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.I)
+    return re.sub(r"\s+", " ", cleaned).strip(" ._-")
+
+
 def _bracket_release_group(path: Path) -> str | None:
     """Return a likely release group such as ``TTG`` from ``[TTG]``."""
     for value in reversed(re.findall(r"\[([^\[\]]+)\]", path.stem)):
@@ -2846,6 +2860,12 @@ def _prepare_folder(
     base_title, year, common_source, common_group, edition, _episode, common_platform = _resolve_fields(
         shared_args, first_path, first_media
     )
+    # ``filename_hints`` cannot infer a regular ``Sxx`` episode token from
+    # disc-style names such as ``Season2.Disc1``.  Once the disc-aware parser
+    # has established the SxxDxx identity, remove those markers from the
+    # fallback title so they are not repeated in every normalized filename.
+    if disc_collection and not args.title:
+        base_title = _strip_tv_disc_tokens(base_title) or base_title
     if not year:
         # The first sorted episode often has a scene-style folder name without
         # a year, while later episodes carry the year token.  Use the most

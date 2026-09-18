@@ -332,6 +332,8 @@ media-title-rename prepare "F:\TV\The Office" --apply
 
 如果 `prepare`/`publish` 的输入是单张带有季号和碟号的 ISO，程序会先在该 ISO 所在目录中查找同季的其它 `.iso` 文件，只合并同一季且碟号不重复的文件；同目录的其它季不会被加入，原目录也不会被整体改名。匹配到的整组光盘会共用一次 BDInfo、截图和发布资料，并写入一个 V1 私有多文件种子。若同季出现重复碟号（通常表示同目录有多个版本），程序会停止自动合并并要求传入整季目录，避免把不同版本混入同一个种子。
 
+分碟文件名中的 `Season2`、`Disc1`、`S02D01` 等身份标记只用于识别季碟号，不会再被重复写入剧名；像 `blucook#300\@CHDBits` 这样的发布组写法也会统一规范为 `blucook#300@CHDBits`。如果输出提示“未获得 TMDB ID”，表示没有配置 `TMDB_READ_ACCESS_TOKEN`/`TMDB_API_KEY` 且没有传 `--tmdb-id`，并不代表分碟匹配失败；JoJo 这组可以显式添加 `--tmdb-id 45790`。
+
 ### TMDB 名称增强
 
 申请 TMDB API Read Access Token 后，在当前 PowerShell 会话中配置：

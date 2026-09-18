@@ -30,6 +30,7 @@ from media_title_renamer.prepare import (
     _read_initial_iso_media,
     _series_folder_name,
     _season_numbers_in_text,
+    _strip_tv_disc_tokens,
     _torrent_file_specs,
     _torrent_resume_identity,
     _unmount_iso,
@@ -56,6 +57,12 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_disc_style_season_and_disc_tokens_are_removed_from_fallback_title(self):
+        self.assertEqual(
+            _strip_tv_disc_tokens("JoJo no Kimyou na Bouken Season2 Disc1"),
+            "JoJo no Kimyou na Bouken",
+        )
+
     def test_single_disc_iso_matches_only_same_season_siblings(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -90,9 +97,9 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "downloads"
             root.mkdir()
-            selected = root / "Show.Season2.Disc1.2020.JPN.BluRay.AVC.LPCM.2.0-GRP.iso"
-            same_season = root / "Show.Season2.Disc2.2020.JPN.BluRay.AVC.LPCM.2.0-GRP.iso"
-            other_season = root / "Show.Season3.Disc1.2021.JPN.BluRay.AVC.LPCM.2.0-GRP.iso"
+            selected = root / "JoJo.no.Kimyou.na.Bouken.Season2.Disc1.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook300@CHDBits.iso"
+            same_season = root / "JoJo.no.Kimyou.na.Bouken.Season2.Disc2.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook300@CHDBits.iso"
+            other_season = root / "JoJo.no.Kimyou.na.Bouken.Season3.Disc1.2015.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook300@CHDBits.iso"
             for path in (selected, same_season, other_season):
                 path.write_bytes(b"small test iso")
 
@@ -100,10 +107,8 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
                 package_path = prepare_main(
                     [
                         str(selected),
-                        "--title",
-                        "Show",
                         "--year",
-                        "2020",
+                        "2014",
                         "--source",
                         "BluRay",
                         "--offline",
@@ -124,6 +129,8 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         self.assertEqual(len(renamed), 2, sorted(str(path) for path in (root / "downloads").parent.rglob("*.iso")))
         self.assertEqual(package["input_path"], str(selected))
         self.assertEqual({record["episode"] for record in package["files"]}, {"S02D01", "S02D02"})
+        self.assertEqual(package["group"], "blucook300@CHDBits")
+        self.assertTrue(package["filename"].startswith("JoJo no Kimyou na Bouken-2014-S02"))
         self.assertTrue(all("Season 02" not in record["relative_path"] for record in package["files"]))
 
     def test_single_season_root_detection_distinguishes_multi_season_pack(self):

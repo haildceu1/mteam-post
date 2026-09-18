@@ -502,7 +502,12 @@ def _strip_group(stem: str) -> tuple[str, str | None]:
         return stem, None
     separator = separators[0]
     candidate = stem[separator + 1 :].strip(" ._-")
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._&@ -]*", candidate):
+    # Some release names escape the at-sign in shell-oriented listings
+    # (``blucook#300\@CHDBits``).  Treat that spelling as one group and keep
+    # the useful ``#300`` suffix instead of dropping the group for only some
+    # discs in the same set.
+    candidate = candidate.replace("\\@", "@").replace("\\", "")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._&#@ -]*", candidate):
         return stem[:separator], candidate
     return stem, None
 

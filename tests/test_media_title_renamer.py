@@ -7,6 +7,7 @@ from media_title_renamer.cli import (
     _dvd_disc_label,
     _infer_source,
     _strip_release_prefix,
+    _strip_group,
     _video_paths,
     build_title,
     filename_hints,
@@ -44,6 +45,13 @@ def media_json(*, writing_library="", audio_format="DTS", audio_profile="MA / Co
 
 
 class MediaTitleRenamerTests(unittest.TestCase):
+    def test_disc_release_group_with_escaped_at_sign_is_kept_consistently(self):
+        stem, group = _strip_group(
+            "JoJo.Season2.Disc1.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook#300\\@CHDBits"
+        )
+        self.assertTrue(stem.endswith("DTS-HD.MA.2.1"))
+        self.assertEqual(group, "blucook#300@CHDBits")
+
     def test_large_untagged_iso_is_inferred_as_bluray(self):
         self.assertEqual(
             _infer_source("第1碟", ".iso", file_size=42_610_000_000),
