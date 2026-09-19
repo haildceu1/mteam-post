@@ -58,6 +58,15 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_noninteractive_torrent_progress_flushes_each_render(self):
+        output = io.StringIO()
+        with redirect_stdout(output):
+            progress = TorrentProgress(100, 1)
+            progress.start_file(1, Path("episode.mkv"))
+            self.assertIn("制种进度", output.getvalue())
+            progress.advance(25)
+        self.assertIn("25.0%", output.getvalue())
+
     def test_jojo_part_subtitles_supply_missing_season_numbers(self):
         self.assertEqual(
             _season_number("JoJo's.Bizarre.Adventure.Gold.Experience.2018.D01"),

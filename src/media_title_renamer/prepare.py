@@ -814,7 +814,11 @@ class TorrentProgress:
                 sys.stdout.flush()
                 self.line_active = True
             else:
-                print(_console_safe_text(line))
+                # Some PowerShell/Conda launchers report stdout as
+                # non-interactive even when a human is watching the console.
+                # Flush each bucket so hashing progress is visible instead
+                # of waiting for the process or pipe buffer to fill.
+                print(_console_safe_text(line), flush=True)
         except (OSError, UnicodeError):
             # Progress rendering must never interrupt a multi-hour hash if a
             # terminal/redirected stdout handle disappears.
