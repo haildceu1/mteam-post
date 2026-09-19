@@ -336,6 +336,8 @@ media-title-rename prepare "F:\TV\The Office" --apply
 
 JoJo 动画分碟有时只有 `D01`、`D02` 等碟号，没有 `Sxx`，程序会根据篇章副标题补全季号：`Stardust Crusaders`/`星尘斗士` 为 S02、`Diamond Is Unbreakable`/`不灭钻石` 为 S04、`Gold Experience`/`Golden Wind`/`黄金之风` 为 S05、`Stone Ocean`/`石之海` 为 S06；只有文件名同时包含 JoJo 标识时才启用该回退规则，避免误判普通片名。这样同目录的其它篇章分碟不会被混入当前季。
 
+剧集分碟文件名中的 `COMPLETE` 也视为资源标签，不会写入剧名、剧集目录或规范化后的碟文件名；例如 `The.Crown.S05D01.COMPLETE.BLURAY-SLIPSTREAM.iso` 的标题会按 `The Crown` 处理。
+
 ### TMDB 名称增强
 
 申请 TMDB API Read Access Token 后，在当前 PowerShell 会话中配置：

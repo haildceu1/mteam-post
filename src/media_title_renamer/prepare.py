@@ -2047,6 +2047,7 @@ def _strip_tv_disc_tokens(value: str) -> str:
         r"\bS\d{1,2}D\d{1,2}\b",
         r"\b(?:SEASON|S)\s*0*\d{1,2}\b",
         r"\b(?:DISC|DISK|VOL(?:UME)?|D)\s*0*\d{1,2}\b",
+        r"\bCOMPLETE\b",
         r"第\s*[0-9零〇一二两兩三四五六七八九十]+\s*(?:季|碟|盘|盤|张|張)",
     )
     for pattern in patterns:

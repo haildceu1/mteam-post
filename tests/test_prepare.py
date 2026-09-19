@@ -74,6 +74,10 @@ class PrepareTests(unittest.TestCase):
             _strip_tv_disc_tokens("JoJo no Kimyou na Bouken Season2 Disc1"),
             "JoJo no Kimyou na Bouken",
         )
+        self.assertEqual(
+            _strip_tv_disc_tokens("The Crown COMPLETE"),
+            "The Crown",
+        )
 
     def test_single_disc_iso_matches_only_same_season_siblings(self):
         with tempfile.TemporaryDirectory() as directory:
