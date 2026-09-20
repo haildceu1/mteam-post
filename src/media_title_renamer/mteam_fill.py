@@ -383,12 +383,16 @@ def _select_category(driver, category: str) -> bool:
             const wanted = canon(arguments[0]);
             const candidates = [...document.querySelectorAll(
               '[role="option"], .ant-select-item-option, li, .ant-cascader-menu-item'
-            )];
-            const match = candidates.find(el => {
+            )].filter(el => {
                 const visible = !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-                const text = canon(el.textContent || '');
-                return visible && (text === wanted || text.includes(wanted) || wanted.includes(text));
+                return visible;
               });
+            // Prefer an exact canonical label.  In particular, do not let
+            // the shorter "动画" option satisfy a request for
+            // "动画/Bluray" merely because it is a substring of the target;
+            // the dropdown normally contains both entries in that order.
+            const exact = candidates.find(el => canon(el.textContent || '') === wanted);
+            const match = exact || candidates.find(el => canon(el.textContent || '').includes(wanted));
             if (match) return match;
 
             // Ant Design may virtualize the option list.  In that case an
