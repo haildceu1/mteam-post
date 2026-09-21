@@ -9,7 +9,13 @@ import sys
 from pathlib import Path
 
 from .mteam_fill import main as mteam_fill_main
-from .prepare import _confirm_rename_preview, _write_rename_backup, main as prepare_main
+from .prepare import (
+    _apply_hardlink_files,
+    _confirm_rename_preview,
+    _same_file,
+    _write_rename_backup,
+    main as prepare_main,
+)
 
 
 def _default_profile_dir() -> Path:
@@ -70,6 +76,11 @@ def _parser() -> argparse.ArgumentParser:
     uploads.add_argument("--no-upload", dest="upload", action="store_false", help="只填写字段，不上传文件")
     parser.set_defaults(upload=True)
     parser.add_argument("--yes", action="store_true", help="跳过发布页写入/上传前的确认")
+    parser.add_argument(
+        "--hardlink",
+        action="store_true",
+        help="准备阶段创建规范路径硬链接并保留原始媒体；要求同一 NTFS/ReFS 卷",
+    )
     parser.add_argument("--keep-open", action="store_true", help="填表后保持 ChromeDriver 窗口打开")
     parser.add_argument("--login-timeout", type=int, default=600, help="等待手工登录的秒数；默认 600")
     return parser
@@ -160,6 +171,30 @@ def _apply_reused_single_file_rename(
         return False
     target = input_path.with_name(target_name)
     if target == input_path:
+        return False
+    if payload.get("hardlink_mode"):
+        if target.exists() and _same_file(input_path, target):
+            print(f"已检测到现有规范硬链接，源文件保持不变：{target}")
+            return False
+        print("\n硬链接模式：将创建规范名称硬链接，源文件保持不变。")
+        if target.exists():
+            raise FileExistsError(f"硬链接目标已存在且不是同一文件：{target}")
+        if not _confirm_rename_preview(needs_rename=True, skip_confirmation=skip_confirmation):
+            raise ValueError("已取消硬链接创建；未修改源文件，也未继续填写发布页。")
+        backup_path = _write_rename_backup(
+            package_path.parent / "rename-backup.txt",
+            root_before=input_path,
+            root_after=target,
+            pairs=[(input_path, target)],
+        )
+        _apply_hardlink_files([(input_path, target)])
+        payload["prepared_path"] = str(target)
+        payload["rename_backup_path"] = str(backup_path)
+        package_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        print(f"已创建规范名称硬链接：{target}；源文件未移动、未改名。")
         return False
     if target.exists():
         raise FileExistsError(f"目标文件已存在：{target}")
@@ -275,6 +310,8 @@ def _refresh_with_reused_torrent(
             )
 
     generation_options = [option for option in prepare_options if option != "--apply"]
+    if args.hardlink:
+        generation_options.append("--hardlink")
     if args.yes:
         generation_options.append("--yes")
     generation_options.extend(["--skip-torrent", "--output", str(package_path.parent)])
@@ -372,13 +409,22 @@ def main(argv: list[str] | None = None) -> None:
                 "复用现有资料包时不能再传 prepare 参数：" + " ".join(unsupported)
             )
         renamed = False
+        cached_payload = _load_package(package_path)
+        if args.hardlink and not cached_payload.get("hardlink_mode"):
+            parser.error(
+                "现有资料包不是硬链接模式；为避免改动原始文件，请先用 --refresh-prepare --hardlink 重新准备"
+            )
         if not direct_package and "--apply" in prepare_options and args.input.is_dir():
             # A folder package made by ``prepare`` without ``--apply`` has
             # already paid the MediaInfo/screenshot/torrent cost, but its
             # source tree is still under the original root.  Let prepare's
             # cache path apply that recorded plan; it will not re-probe or
             # re-hash.  Already-applied packages are left untouched.
-            payload = _load_package(package_path)
+            payload = cached_payload
+            if args.hardlink and not payload.get("hardlink_mode"):
+                parser.error(
+                    "现有资料包不是硬链接模式；为避免改动原始目录，请移除旧资料包或先重新执行 prepare --hardlink"
+                )
             target_filename = payload.get("target_filename")
             prepared_path = payload.get("prepared_path")
             target_path = (
@@ -410,6 +456,8 @@ def main(argv: list[str] | None = None) -> None:
                 and "target_filename" not in payload
             ):
                 generation_options = ["--apply"]
+                if payload.get("hardlink_mode"):
+                    generation_options.append("--hardlink")
                 if args.yes:
                     generation_options.append("--yes")
                 try:
@@ -442,6 +490,8 @@ def main(argv: list[str] | None = None) -> None:
         if "--apply" not in prepare_options:
             parser.error("publish 为保证种子与文件名一致，必须传入 --apply")
         generation_options = list(prepare_options)
+        if args.hardlink:
+            generation_options.append("--hardlink")
         if args.yes:
             generation_options.append("--yes")
         package_path = prepare_main([str(args.input), *generation_options])

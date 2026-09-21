@@ -1,6 +1,7 @@
 import hashlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -58,6 +59,126 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_hardlink_folder_apply_keeps_source_tree_and_materializes_canonical_tree(
+        self, prepare_technical_info_mock, read_mediainfo_mock
+    ):
+        media = MediaInfo(
+            width=1920,
+            height=1080,
+            resolution="1080p",
+            video_format="AVC",
+            writing_library="",
+            video_codec="AVC",
+            hdr=(),
+            hfr=None,
+            audio_codec="DD",
+            audio_channels="5.1",
+            audio_tracks=1,
+            audio_bitrate=640000,
+            audio_language="en",
+        )
+        read_mediainfo_mock.return_value = media
+        prepare_technical_info_mock.return_value = (
+            "MediaInfo",
+            "General\nComplete name : episode.mkv\n",
+            Path("temporary-mediainfo.txt"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory)
+            root = parent / "Original Show"
+            root.mkdir()
+            first = root / "Original.Show.S01E01.mkv"
+            second = root / "Original.Show.S01E02.mkv"
+            first.write_bytes(b"episode one")
+            second.write_bytes(b"episode two")
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root),
+                        "--title",
+                        "Original Show",
+                        "--year",
+                        "2024",
+                        "--source",
+                        "HDTV",
+                        "--offline",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                        "--hardlink",
+                        "--apply",
+                        "--yes",
+                    ]
+                )
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+            target_root = Path(payload["target_prepared_path"])
+            linked = sorted(target_root.rglob("*.mkv"))
+            self.assertTrue(root.is_dir())
+            self.assertTrue(first.is_file())
+            self.assertTrue(second.is_file())
+            self.assertEqual([item.name for item in linked], [
+                "Original Show 2024 S01E01 1080p HDTV H.264 DD5.1.mkv",
+                "Original Show 2024 S01E02 1080p HDTV H.264 DD5.1.mkv",
+            ])
+            self.assertTrue(all(os.path.samefile(first if "E01" in item.name else second, item) for item in linked))
+            self.assertTrue(payload["hardlink_mode"])
+            self.assertEqual(payload["prepared_path"], str(target_root))
+
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_hardlink_single_file_apply_keeps_original_name(self, prepare_technical_info_mock, read_mediainfo_mock):
+        media = MediaInfo(
+            width=1920,
+            height=1080,
+            resolution="1080p",
+            video_format="AVC",
+            writing_library="",
+            video_codec="AVC",
+            hdr=(),
+            hfr=None,
+            audio_codec="DD",
+            audio_channels="5.1",
+            audio_tracks=1,
+            audio_bitrate=640000,
+            audio_language="en",
+        )
+        read_mediainfo_mock.return_value = media
+        prepare_technical_info_mock.return_value = (
+            "MediaInfo",
+            "General\nComplete name : source.mkv\n",
+            Path("temporary-mediainfo.txt"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Source.Show.2024.1080p.HDTV.AVC.DD5.1.mkv"
+            source.write_bytes(b"source bytes")
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(source),
+                        "--title",
+                        "Source Show",
+                        "--year",
+                        "2024",
+                        "--source",
+                        "HDTV",
+                        "--offline",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                        "--hardlink",
+                        "--apply",
+                        "--yes",
+                    ]
+                )
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+            target = Path(payload["prepared_path"])
+            self.assertTrue(source.is_file())
+            self.assertTrue(target.is_file())
+            self.assertTrue(os.path.samefile(source, target))
+            self.assertTrue(payload["hardlink_mode"])
+
     def test_noninteractive_torrent_progress_flushes_each_render(self):
         output = io.StringIO()
         with redirect_stdout(output):

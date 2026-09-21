@@ -320,7 +320,27 @@ media-title-rename prepare "F:\TV\The Office" --apply
 
 如果种子哈希已经完成、最后目录改名时报 `WinError 5`，先暂停或关闭 qBittorrent（它可能仍持有文件句柄），再用相同输入路径重新执行 `prepare ... --apply`。新版会识别“哈希完成但目录改名失败”的资料包，只应用未完成的改名计划，不会重新扫描或制种。若资料来自旧版本且没有 `target_filename`/`torrent_root_name` 字段，则无法安全恢复，只能完整重建一次。
 
-硬链接只有在同一 NTFS/ReFS 卷上可用，且硬链接与原文件共享内容：修改任一链接会影响另一链接。你之前的 `chkdsk F:` 输出显示 F: 为 exFAT，不能创建 Windows 硬链接；在该盘上没有既保留 qBittorrent 原路径、又零空间生成另一套改名路径的可靠方法。可选方案是暂停 qBittorrent 后直接改名，并在 qBittorrent 中使用“设置位置”指向新目录；或者把数据放到 NTFS/ReFS 卷后再考虑显式硬链接方案。不要在 exFAT 上用 `mklink` 代替，通常会失败或无法被 qBittorrent 正确识别。
+如果 qBittorrent/下载器必须继续使用原始路径，可以启用硬链接模式，让程序在同一卷的规范目录中创建**不占用第二份媒体空间**的硬链接；源文件和源目录不会移动、改名或删除：
+
+```powershell
+# 单个视频或 ISO
+media-title-rename publish "E:\Movie\input.mkv" `
+  --hardlink --apply
+
+# 整季剧集；原始剧集目录保持不变，规范目录用于做种和发布
+media-title-rename publish "E:\TV\The Office" `
+  --hardlink --apply
+
+# 只准备资料，确认预览后再创建硬链接（不会重新探测/哈希）
+media-title-rename prepare "E:\TV\The Office" `
+  --hardlink
+media-title-rename prepare "E:\TV\The Office" `
+  --hardlink --apply
+```
+
+硬链接与原文件共享同一 inode/数据：删除规范路径不会删除源数据，只有最后一个链接被删除时空间才会释放；但通过任一链接写入或修改内容会同时影响另一条路径。因此创建后不要在规范路径上编辑、转码或覆盖媒体。硬链接要求源和目标位于同一个 NTFS/ReFS 卷（Linux 为同一文件系统）；exFAT、跨盘符/跨挂载点会被拒绝并回滚已创建的链接。程序会在 `.prepare\rename-backup.txt` 中记录源路径到规范路径的映射，并在失败时清理本次已创建的链接。
+
+硬链接模式的 `mteam-prepare.json` 会写入 `hardlink_mode=true` 和规范 `prepared_path`。后续直接传入原始路径执行 `publish` 时会自动复用该资料包，不会把源文件改名；如果目标硬链接已经存在，会检测为同一文件并跳过创建。若资料包不是硬链接模式，显式传入 `--hardlink` 会停止并要求先重新准备，避免误修改原始文件。
 
 制种过程支持自动续传。首次开始哈希时，程序会在目标 `.torrent` 同目录建立两个临时检查点文件：`<种子名>.torrent.resume.json`（输入文件清单和属性）与 `<种子名>.torrent.resume.pieces`（已经完成的 V1 分块哈希）。如果因终端、USB 磁盘或读取错误中断，直接以**完全相同的输入路径和命令**再次运行即可；程序会提示“发现未完成的种子哈希，将从检查点继续”，并从上一个完整分块续算，而不是从 0% 重新读取。制种采用恒定内存的流式分块哈希和可复用读取缓冲区，不会把整集或整季数据累积到内存；内存不足时也会保留检查点。为保证种子正确性，续传期间不能移动、改名、修改源文件，也不能改变文件清单、大小或修改时间；发生这些变化时程序会拒绝继续，并明确提示检查点位置。种子成功写出后，两个检查点会自动删除。读取再次失败时，错误会给出具体文件、文件内偏移和全局进度，便于判断是否总在同一位置失败。
 

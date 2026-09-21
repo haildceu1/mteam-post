@@ -1830,6 +1830,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("input", type=Path, help="单个视频/ISO，或剧集所在文件夹")
     parser.add_argument("--apply", action="store_true", help="资料准备成功后执行规范重命名")
     parser.add_argument("--yes", action="store_true", help="跳过重命名格式预览确认")
+    parser.add_argument(
+        "--hardlink",
+        action="store_true",
+        help="用规范路径创建硬链接并保留原始文件/目录；要求同一 NTFS/ReFS 卷",
+    )
     parser.add_argument("--recursive", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, help="资料包输出目录；默认在媒体旁创建 .prepare 文件夹")
     parser.add_argument("--title", help="手工指定主标题，并优先于 TMDB")
@@ -2507,6 +2512,84 @@ def _same_path(left: Path, right: Path) -> bool:
     return os.path.normcase(str(left.resolve())) == os.path.normcase(str(right.resolve()))
 
 
+def _same_file(left: Path, right: Path) -> bool:
+    """Return whether two existing paths refer to the same filesystem file."""
+    if _same_path(left, right):
+        return True
+    try:
+        return left.is_file() and right.is_file() and os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
+def _create_hardlink(source: Path, target: Path) -> bool:
+    """Create one hard link without ever renaming or deleting ``source``.
+
+    Hard links share the underlying bytes with the source.  This is therefore
+    deliberately limited to a file-system that supports hard links (normally
+    NTFS/ReFS on Windows, and one POSIX file system on Linux).
+    """
+    source = source.resolve()
+    target = target.resolve()
+    if _same_path(source, target):
+        return False
+    if not source.is_file():
+        raise FileNotFoundError(f"找不到硬链接源文件：{source}")
+    if target.exists():
+        if _same_file(source, target):
+            return False
+        raise FileExistsError(f"硬链接目标已存在且不是同一文件：{target}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(source, target)
+    except OSError as exc:
+        raise RuntimeError(
+            f"创建硬链接失败：{source} → {target}：{exc}；"
+            "硬链接要求源和目标位于同一 NTFS/ReFS（Linux 为同一文件系统）卷，"
+            "exFAT、跨盘符/跨挂载点不支持"
+        ) from exc
+    return True
+
+
+def _apply_hardlink_files(pairs: list[tuple[Path, Path]]) -> int:
+    """Materialize a set of (source, target) hard links transactionally."""
+    created_links: list[Path] = []
+    created_directories: list[Path] = []
+    try:
+        for source, target in pairs:
+            if _same_path(source, target):
+                continue
+            if target.exists() and _same_file(source, target):
+                continue
+            if target.exists():
+                raise FileExistsError(f"硬链接目标已存在且不是同一文件：{target}")
+            missing: list[Path] = []
+            parent = target.parent
+            while not parent.exists():
+                missing.append(parent)
+                parent = parent.parent
+            for directory in reversed(missing):
+                directory.mkdir()
+                created_directories.append(directory)
+            _create_hardlink(source, target)
+            created_links.append(target)
+    except (FileNotFoundError, FileExistsError, RuntimeError, OSError) as exc:
+        rollback_errors: list[str] = []
+        for target in reversed(created_links):
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as rollback_exc:
+                rollback_errors.append(f"{target}: {rollback_exc}")
+        for directory in reversed(created_directories):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass
+        detail = f"；回滚也遇到问题：{' | '.join(rollback_errors)}" if rollback_errors else ""
+        raise RuntimeError(f"批量创建硬链接失败：{exc}{detail}") from exc
+    return len(created_links)
+
+
 def _write_rename_backup(
     backup_path: Path,
     *,
@@ -2658,8 +2741,15 @@ def _cached_folder_prepare_package(root: Path) -> tuple[Path, dict[str, Any], Pa
         # the final directory rename.  If that target is still absent, the
         # package is recoverable: all media hashes and the canonical torrent
         # are already complete, so only the pending filesystem rename remains.
+        hardlink_mode = bool(payload.get("hardlink_mode"))
         if prepared_path != wanted:
-            if not _same_path(prepared_path, target_root) or target_root.exists():
+            if not _same_path(prepared_path, target_root):
+                continue
+            # A hard-link package intentionally leaves the source root in
+            # place, so its prepared target normally already exists on a
+            # subsequent invocation.  Ordinary rename packages still require
+            # the target root to be absent so the atomic rename is safe.
+            if target_root.exists() and not hardlink_mode:
                 continue
         torrent = payload.get("torrent")
         torrent_path = Path(str(torrent.get("path") or "")) if isinstance(torrent, dict) else Path()
@@ -2703,6 +2793,7 @@ def _apply_cached_folder_prepare(
     cached: tuple[Path, dict[str, Any], Path],
 ) -> Path | None:
     package_path, payload, _torrent_path = cached
+    hardlink_mode = bool(payload.get("hardlink_mode"))
     target_root = root.parent / str(payload["target_filename"])
     records = payload["files"]
     pairs: list[tuple[Path, Path, Path]] = []
@@ -2714,12 +2805,14 @@ def _apply_cached_folder_prepare(
         # before root.rename() would make Windows reject the directory move.
         apply_target = root / relative
         pairs.append((source, apply_target, final_target))
-    if target_root.exists() and not _same_path(root, target_root):
+    if target_root.exists() and not _same_path(root, target_root) and not hardlink_mode:
         raise FileExistsError(f"目标剧集目录已存在，未执行任何改名：{target_root}")
     conflicts = [
         final_target
         for source, _apply_target, final_target in pairs
-        if final_target.exists() and not _same_path(source, final_target)
+        if final_target.exists()
+        and not (hardlink_mode and _same_file(source, final_target))
+        and not _same_path(source, final_target)
     ]
     if conflicts:
         raise FileExistsError("目标文件已存在，未执行任何改名：" + "；".join(str(path) for path in conflicts))
@@ -2733,12 +2826,14 @@ def _apply_cached_folder_prepare(
         relative_source = source.relative_to(root)
         relative_target = final_target.relative_to(target_root if not _same_path(root, target_root) else root)
         print(f"  {relative_source} → {relative_target}")
+    if hardlink_mode:
+        print("提示：资料包使用硬链接模式；确认后只创建规范路径硬链接，源文件和源目录保持不变。")
     if not _confirm_rename_preview(
         needs_rename=(
-            not _same_path(root, target_root)
+            (not hardlink_mode and not _same_path(root, target_root))
             or any(
-                not _same_path(source, apply_target)
-                for source, apply_target, _final_target in pairs
+                not _same_file(source, final_target)
+                for source, _apply_target, final_target in pairs
             )
         ),
         skip_confirmation=args.yes,
@@ -2752,33 +2847,36 @@ def _apply_cached_folder_prepare(
         pairs=[(source, final_target) for source, _apply_target, final_target in pairs],
     )
 
-    completed: list[tuple[Path, Path]] = []
-    created: list[Path] = []
-    root_renamed = False
-    try:
-        for source, apply_target, _final_target in pairs:
-            if _same_path(source, apply_target):
-                continue
-            if not apply_target.parent.exists():
-                apply_target.parent.mkdir(parents=True, exist_ok=True)
-                created.append(apply_target.parent)
-            source.rename(apply_target)
-            completed.append((source, apply_target))
-        if not _same_path(root, target_root):
-            root.rename(target_root)
-            root_renamed = True
-    except OSError as exc:
-        if root_renamed and target_root.exists() and not root.exists():
-            target_root.rename(root)
-        for source, target in reversed(completed):
-            if target.exists() and not source.exists():
-                target.rename(source)
-        for directory in reversed(created):
-            try:
-                directory.rmdir()
-            except OSError:
-                pass
-        raise RuntimeError(f"应用缓存重命名计划失败：{exc}") from exc
+    if hardlink_mode:
+        _apply_hardlink_files([(source, final_target) for source, _apply_target, final_target in pairs])
+    else:
+        completed: list[tuple[Path, Path]] = []
+        created: list[Path] = []
+        root_renamed = False
+        try:
+            for source, apply_target, _final_target in pairs:
+                if _same_path(source, apply_target):
+                    continue
+                if not apply_target.parent.exists():
+                    apply_target.parent.mkdir(parents=True, exist_ok=True)
+                    created.append(apply_target.parent)
+                source.rename(apply_target)
+                completed.append((source, apply_target))
+            if not _same_path(root, target_root):
+                root.rename(target_root)
+                root_renamed = True
+        except OSError as exc:
+            if root_renamed and target_root.exists() and not root.exists():
+                target_root.rename(root)
+            for source, target in reversed(completed):
+                if target.exists() and not source.exists():
+                    target.rename(source)
+            for directory in reversed(created):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            raise RuntimeError(f"应用缓存重命名计划失败：{exc}") from exc
 
     payload["prepared_path"] = str(target_root)
     payload["filename"] = target_root.name
@@ -2787,7 +2885,10 @@ def _apply_cached_folder_prepare(
         record["prepared_path"] = str(final_target)
         record["target_path"] = str(final_target)
     package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"已应用缓存重命名计划；资料包和种子保持可用：{package_path}")
+    if hardlink_mode:
+        print(f"已应用缓存硬链接计划；源文件和源目录保持不变，资料包和种子保持可用：{package_path}")
+    else:
+        print(f"已应用缓存重命名计划；资料包和种子保持可用：{package_path}")
     return package_path
 
 
@@ -2996,11 +3097,14 @@ def _prepare_folder(
             country=country,
             include_audio_count=args.audio_count,
         )
-        if rename_root:
+        if rename_root and not args.hardlink:
             season_directory = root if flatten_single_season else root / _season_folder(episode)
             target = season_directory / (release_title + path.suffix.lower())
             logical = target.relative_to(root)
         else:
+            # Hard-link mode materializes the canonical tree beside the
+            # source root, so the source tree is never renamed.  A matched
+            # single-season disc collection already uses this branch.
             season_directory = target_root if flatten_single_season else target_root / _season_folder(episode)
             target = season_directory / (release_title + path.suffix.lower())
             logical = target.relative_to(target_root)
@@ -3085,12 +3189,14 @@ def _prepare_folder(
     )
 
     output_dir = (args.output or root.parent / f"{pack_title}.prepare").resolve()
-    if args.apply:
+    if args.apply and (rename_root or args.hardlink):
         try:
             output_dir.relative_to(root.resolve())
         except ValueError:
             pass
         else:
+            if args.hardlink:
+                raise ValueError("硬链接模式下，--output 不能位于输入目录内")
             raise ValueError("重命名剧集根目录时，--output 不能位于输入目录内")
     output_dir.mkdir(parents=True, exist_ok=True)
     if cached_technical:
@@ -3219,17 +3325,29 @@ def _prepare_folder(
             for plan in provisional
         ],
     )
+    if args.apply and args.hardlink:
+        link_pairs = [
+            (plan.source_path, target_root / plan.logical_path)
+            for plan in provisional
+        ]
+        created_links = _apply_hardlink_files(link_pairs)
+        print(f"已创建 {created_links} 个规范路径硬链接；源文件和源目录保持不变。")
     payload["rename_backup_path"] = str(backup_path)
+    payload["hardlink_mode"] = bool(args.hardlink)
     package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if args.apply and rename_root:
-        _apply_folder_renames(provisional, root=root, target_root=target_root)
-    elif args.apply:
-        _apply_folder_renames(provisional)
+    if args.apply and not args.hardlink:
+        if rename_root:
+            _apply_folder_renames(provisional, root=root, target_root=target_root)
+        else:
+            _apply_folder_renames(provisional)
 
     print("\nM-Team 整季发布资料已准备完：")
     print(f"  整季标题：{pack_title}")
-    rename_status = "已全部改名" if args.apply else "尚未改名"
+    if args.apply and args.hardlink:
+        rename_status = "已创建硬链接，源文件保持不变"
+    else:
+        rename_status = "已全部改名" if args.apply else "尚未改名"
     print(f"  视频文件：{len(provisional)} 个，{rename_status}")
     if args.apply and rename_root and not _same_path(root, target_root):
         print(f"  剧集目录：{target_root}")
@@ -3251,7 +3369,12 @@ def _prepare_folder(
         print(f"  V1 私有多文件种子：{torrent_path}")
     print(f"  发布资料包：{package_path}")
     if not args.apply:
-        print("  注意：源文件尚未改名；确认后重新执行并添加 --apply。")
+        if args.hardlink:
+            print("  注意：尚未创建硬链接；确认后重新执行并添加 --apply。")
+        else:
+            print("  注意：源文件尚未改名；确认后重新执行并添加 --apply。")
+    elif args.hardlink:
+        print("  硬链接模式：原始文件和目录未移动、未改名；规范路径与原文件共享数据。")
     print(f"  原始名称备份：{backup_path}")
     return package_path
 
@@ -3329,12 +3452,19 @@ def main(argv: list[str] | None = None) -> Path | None:
             include_audio_count=args.audio_count,
         )
         target = path.with_name(release_title + path.suffix.lower())
-        if args.apply and target.exists() and target != path:
+        if (
+            args.apply
+            and target.exists()
+            and target != path
+            and not (args.hardlink and _same_file(path, target))
+        ):
             raise FileExistsError(f"目标文件已存在：{target}")
 
         print("\n重命名格式预览：")
         marker = "=" if target == path else "→"
         print(f"  {path.name} {marker} {target.name}")
+        if args.hardlink and target != path:
+            print("  硬链接模式：确认后创建规范名称的硬链接，原始文件保持不变。")
         if args.apply and not _confirm_rename_preview(
             needs_rename=target != path,
             skip_confirmation=args.yes,
@@ -3409,8 +3539,12 @@ def main(argv: list[str] | None = None) -> Path | None:
         )
         prepared_path = path
         if args.apply and target != path:
-            path.rename(target)
-            prepared_path = target
+            if args.hardlink:
+                _apply_hardlink_files([(path, target)])
+                prepared_path = target
+            else:
+                path.rename(target)
+                prepared_path = target
 
         imdb_url = f"https://www.imdb.com/title/{tmdb.imdb_id}/" if tmdb and tmdb.imdb_id else ""
         payload = {
@@ -3420,6 +3554,7 @@ def main(argv: list[str] | None = None) -> Path | None:
             "prepared_path": str(prepared_path),
             "release_name": release_title,
             "filename": target.name,
+            "hardlink_mode": bool(args.hardlink),
             "kind": kind,
             "episode": episode or "",
             "year": year or "",
@@ -3467,7 +3602,12 @@ def main(argv: list[str] | None = None) -> Path | None:
         print(f"  发布资料包：{package_path}")
         print(f"  原始名称备份：{backup_path}")
         if not args.apply and target != path:
-            print(f"  注意：源文件尚未改名；确认后可重新执行并添加 --apply，目标名为 {target.name}")
+            if args.hardlink:
+                print(f"  注意：尚未创建硬链接；确认后可重新执行并添加 --apply，目标名为 {target.name}")
+            else:
+                print(f"  注意：源文件尚未改名；确认后可重新执行并添加 --apply，目标名为 {target.name}")
+        elif args.apply and args.hardlink and target != path:
+            print("  硬链接模式：原始文件未移动、未改名；规范路径与原文件共享数据。")
         return package_path
     except (FileNotFoundError, FileExistsError, RuntimeError, ValueError, OSError) as exc:
         parser.error(str(exc))
