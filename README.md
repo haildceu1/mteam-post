@@ -411,6 +411,8 @@ media-title-rename publish "F:\TV\20.22" --refresh-prepare --reuse-torrent --app
 
 `--refresh-prepare --reuse-torrent` 适合需要修正 TMDB/豆瓣、分类、简介、MediaInfo/BDInfo 或截图，但媒体内容和种子内部文件名没有变化的情况。程序会自动找到原资料包，重新探测并更新 M-Team 字段，同时保留原 `.torrent`；不会重新读取整部视频计算分块哈希。刷新前会比较单文件名或电视剧目录/集文件的逻辑路径，若规范名称发生变化会停止并要求去掉 `--reuse-torrent` 完整重新制种，避免页面标题、实际文件名和种子元数据不一致。电视剧资料包若原来尚未使用 `--apply` 生成目录种子，不能在复用种子的同时改根目录名，也需要完整重新制种。
 
+如果旧版资料目录只有 `.torrent`、没有 `mteam-prepare.json`，只要 torrent 内部根目录名与当前输入目录一致，`publish --refresh-prepare --reuse-torrent --apply` 会读取 torrent 的 V1 文件列表和大小，先与本地文件逐项核对，再自动恢复最小资料索引并刷新发布资料；验证通过后仍然不会重新哈希。若文件清单、大小或根目录不一致，程序会停止并要求重新准备，避免误套用其它版本的种子。
+
 ## 批量准备和上传字幕
 
 M-Team 的[官方字幕命名规则](https://wiki.m-team.cc/zh-tw/upload-subtitle-rules)要求：字幕主文件名与种子内对应视频的主文件名相同，并在扩展名前加入语言标识；简体中文使用 `.chs`。例如视频为 `Survivor.S07E01.mkv`，对应字幕应为：

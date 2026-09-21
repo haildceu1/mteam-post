@@ -686,6 +686,72 @@ def _bencode(value: Any) -> bytes:
     raise TypeError(f"不支持 bencode 类型：{type(value).__name__}")
 
 
+def _bdecode(data: bytes) -> Any:
+    """Decode the small bencode subset needed to inspect an existing torrent."""
+    index = 0
+
+    def parse() -> Any:
+        nonlocal index
+        if index >= len(data):
+            raise ValueError("bencode 数据意外结束")
+        marker = data[index : index + 1]
+        if marker == b"i":
+            end = data.find(b"e", index + 1)
+            if end < 0:
+                raise ValueError("bencode 整数缺少结束标记")
+            try:
+                value = int(data[index + 1 : end])
+            except ValueError as exc:
+                raise ValueError("bencode 整数无效") from exc
+            index = end + 1
+            return value
+        if marker == b"l":
+            index += 1
+            result: list[Any] = []
+            while True:
+                if index >= len(data):
+                    raise ValueError("bencode 列表缺少结束标记")
+                if data[index : index + 1] == b"e":
+                    index += 1
+                    return result
+                result.append(parse())
+        if marker == b"d":
+            index += 1
+            result: dict[bytes, Any] = {}
+            while True:
+                if index >= len(data):
+                    raise ValueError("bencode 字典缺少结束标记")
+                if data[index : index + 1] == b"e":
+                    index += 1
+                    return result
+                key = parse()
+                if not isinstance(key, bytes):
+                    raise ValueError("bencode 字典键必须是字节字符串")
+                result[key] = parse()
+        if marker.isdigit():
+            colon = data.find(b":", index)
+            if colon < 0:
+                raise ValueError("bencode 字符串缺少长度分隔符")
+            try:
+                length = int(data[index:colon])
+            except ValueError as exc:
+                raise ValueError("bencode 字符串长度无效") from exc
+            if length < 0:
+                raise ValueError("bencode 字符串长度不能为负数")
+            start = colon + 1
+            end = start + length
+            if end > len(data):
+                raise ValueError("bencode 字符串超出数据范围")
+            index = end
+            return data[start:end]
+        raise ValueError(f"bencode 标记无效：{marker!r}")
+
+    value = parse()
+    if index != len(data):
+        raise ValueError("bencode 数据末尾存在额外内容")
+    return value
+
+
 def automatic_piece_length(total_size: int) -> int:
     piece_length = 64 * 1024
     while math.ceil(max(total_size, 1) / piece_length) > 2000 and piece_length < 16 * 1024 * 1024:

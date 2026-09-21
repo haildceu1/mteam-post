@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from media_title_renamer import publish
+from media_title_renamer.prepare import _bencode
 
 
 class PublishTests(unittest.TestCase):
@@ -222,6 +223,81 @@ class PublishTests(unittest.TestCase):
             self.assertEqual(saved["prepared_path"], str(target))
 
         self.assertEqual(mteam_fill_main.call_args.args[0][0], str(package.resolve()))
+
+    @patch("media_title_renamer.publish.mteam_fill_main")
+    @patch("media_title_renamer.publish.prepare_main")
+    def test_refresh_prepare_recovers_missing_json_from_matching_folder_torrent(
+        self, prepare_main, mteam_fill_main
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Justified-2010-S01-S06-[tmdb=1436]"
+            root.mkdir()
+            first = root / "Season 01" / "Justified 2010 S01E01.mkv"
+            second = root / "Season 02" / "Justified 2010 S02E01.mkv"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"first")
+            second.write_bytes(b"second")
+            prepare_dir = Path(directory) / "Justified 2010 S01-S06.prepare"
+            prepare_dir.mkdir()
+            torrent = prepare_dir / f"{root.name}.torrent"
+            torrent.write_bytes(
+                _bencode(
+                    {
+                        b"info": {
+                            b"name": root.name.encode(),
+                            b"piece length": 16384,
+                            b"private": 1,
+                            b"files": [
+                                {b"length": 5, b"path": [b"Season 01", b"Justified 2010 S01E01.mkv"]},
+                                {b"length": 6, b"path": [b"Season 02", b"Justified 2010 S02E01.mkv"]},
+                            ],
+                            b"pieces": b"x" * 40,
+                        }
+                    }
+                )
+            )
+
+            def fake_prepare(argv):
+                self.assertIn("--skip-torrent", argv)
+                package = prepare_dir / "mteam-prepare.json"
+                package.write_text(
+                    json.dumps(
+                        {
+                            "input_path": str(root),
+                            "prepared_path": str(root),
+                            "filename": root.name,
+                            "kind": "tv",
+                            "files": [
+                                {"relative_path": "Season 01/Justified 2010 S01E01.mkv"},
+                                {"relative_path": "Season 02/Justified 2010 S02E01.mkv"},
+                            ],
+                            "torrent": {"path": "", "format": "v1", "private": True},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return package
+
+            prepare_main.side_effect = fake_prepare
+            publish.main(
+                [
+                    str(root),
+                    "--refresh-prepare",
+                    "--reuse-torrent",
+                    "--apply",
+                    "--yes",
+                    "--no-upload",
+                    "--profile-dir",
+                    r"C:\Profiles\mteam",
+                ]
+            )
+
+            recovered = json.loads((prepare_dir / "mteam-prepare.json").read_text(encoding="utf-8"))
+            self.assertEqual(recovered["torrent"]["path"], str(torrent.resolve()))
+            self.assertTrue(recovered["recovered_from_torrent"])
+
+        self.assertEqual(mteam_fill_main.call_args.args[0][0], str((prepare_dir / "mteam-prepare.json").resolve()))
 
     def test_profile_directory_can_be_configured_by_environment(self) -> None:
         with patch.dict(os.environ, {"MTEAM_PROFILE_DIR": r"E:\Profiles\mteam"}):

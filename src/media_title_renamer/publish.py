@@ -7,10 +7,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from .mteam_fill import main as mteam_fill_main
 from .prepare import (
     _apply_hardlink_files,
+    _bdecode,
     _confirm_rename_preview,
     _same_file,
     _write_rename_backup,
@@ -129,6 +131,160 @@ def _find_existing_package(input_path: Path) -> Path:
             "请直接传入 mteam-prepare.json，或先运行 prepare"
         )
     return max(matches, key=lambda item: (item[0], item[1]))[2]
+
+
+def _read_torrent_layout(torrent_path: Path) -> tuple[str, list[tuple[str, int]], int, bool]:
+    """Read a torrent's logical root, file paths, sizes and piece settings."""
+    try:
+        decoded = _bdecode(torrent_path.read_bytes())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"无法读取现有 torrent 的文件列表：{torrent_path}：{exc}") from exc
+    if not isinstance(decoded, dict) or not isinstance(decoded.get(b"info"), dict):
+        raise ValueError(f"现有 torrent 缺少有效 info 字典：{torrent_path}")
+    info = decoded[b"info"]
+    root_value = info.get(b"name")
+    if not isinstance(root_value, bytes) or not root_value:
+        raise ValueError(f"现有 torrent 缺少根目录名称：{torrent_path}")
+    try:
+        root_name = root_value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"现有 torrent 根目录不是 UTF-8：{torrent_path}") from exc
+    piece_length = info.get(b"piece length", 0)
+    private = bool(info.get(b"private", 0))
+    if not isinstance(piece_length, int) or piece_length <= 0:
+        piece_length = 0
+
+    files_value = info.get(b"files")
+    if files_value is None:
+        length = info.get(b"length")
+        if not isinstance(length, int) or length < 0:
+            raise ValueError(f"现有 torrent 缺少有效文件大小：{torrent_path}")
+        return root_name, [(root_name, length)], piece_length, private
+    if not isinstance(files_value, list) or not files_value:
+        raise ValueError(f"现有 torrent 的 files 列表为空或无效：{torrent_path}")
+
+    files: list[tuple[str, int]] = []
+    for item in files_value:
+        if not isinstance(item, dict):
+            raise ValueError(f"现有 torrent 的文件记录无效：{torrent_path}")
+        path_value = item.get(b"path")
+        length = item.get(b"length")
+        if not isinstance(path_value, list) or not path_value or not isinstance(length, int) or length < 0:
+            raise ValueError(f"现有 torrent 的文件路径或大小无效：{torrent_path}")
+        parts: list[str] = []
+        for part in path_value:
+            if not isinstance(part, bytes):
+                raise ValueError(f"现有 torrent 的文件路径不是字节字符串：{torrent_path}")
+            try:
+                decoded_part = part.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ValueError(f"现有 torrent 的文件路径不是 UTF-8：{torrent_path}") from exc
+            if not decoded_part or decoded_part in {".", ".."} or "/" in decoded_part or "\\" in decoded_part:
+                raise ValueError(f"现有 torrent 的文件路径不安全：{torrent_path}")
+            parts.append(decoded_part)
+        files.append(("/".join(parts), length))
+    return root_name, files, piece_length, private
+
+
+def _find_existing_torrent(input_path: Path) -> Path:
+    """Find a sibling torrent whose bencoded root matches the input directory."""
+    resolved = input_path.resolve()
+    candidates: list[Path] = []
+    for prepare_dir in sorted(resolved.parent.glob("*.prepare"), key=lambda item: item.name.casefold()):
+        for torrent in sorted(prepare_dir.glob("*.torrent"), key=lambda item: item.name.casefold()):
+            try:
+                root_name, _files, _piece_length, _private = _read_torrent_layout(torrent)
+            except (OSError, ValueError):
+                continue
+            if root_name.casefold() == resolved.name.casefold():
+                candidates.append(torrent.resolve())
+    if not candidates:
+        raise FileNotFoundError(
+            f"没有找到根目录与 {resolved.name} 一致的现有 torrent；"
+            "请确认 .torrent 与当前规范目录属于同一套文件"
+        )
+    if len(candidates) > 1:
+        raise ValueError("找到多个同名根目录 torrent，无法安全选择：" + "；".join(str(item) for item in candidates))
+    return candidates[0]
+
+
+def _recover_package_from_torrent(input_path: Path, torrent_path: Path) -> Path:
+    """Create a minimal package index when an old prepare folder lacks JSON."""
+    root_name, torrent_files, piece_length, private = _read_torrent_layout(torrent_path)
+    source = input_path.resolve()
+    if source.is_dir():
+        actual: dict[str, int] = {
+            str(path.relative_to(source)).replace("\\", "/"): path.stat().st_size
+            for path in source.rglob("*")
+            if path.is_file()
+        }
+        expected = dict(torrent_files)
+        if actual != expected:
+            missing = sorted(set(expected) - set(actual))
+            extra = sorted(set(actual) - set(expected))
+            details: list[str] = []
+            if missing:
+                details.append(f"种子缺少本地文件 {missing[0]}")
+            if extra:
+                details.append(f"本地多出文件 {extra[0]}")
+            if not details:
+                details.append("本地文件大小与种子记录不一致")
+            raise ValueError("不能从现有 torrent 恢复资料包：" + "；".join(details))
+        kind = "tv"
+        records = [
+            {
+                "source_path": str(source / relative),
+                "relative_path": relative,
+                "filename": Path(relative).name,
+                "size": size,
+            }
+            for relative, size in torrent_files
+        ]
+    elif source.is_file():
+        if len(torrent_files) != 1 or torrent_files[0][0].casefold() != source.name.casefold():
+            raise ValueError("不能从现有 torrent 恢复资料包：torrent 与当前文件名不一致")
+        if torrent_files[0][1] != source.stat().st_size:
+            raise ValueError("不能从现有 torrent 恢复资料包：torrent 与当前文件大小不一致")
+        kind = "movie"
+        records = [
+            {
+                "source_path": str(source),
+                "relative_path": source.name,
+                "filename": source.name,
+                "size": torrent_files[0][1],
+            }
+        ]
+    else:
+        raise FileNotFoundError(f"找不到资料包对应的媒体路径：{source}")
+
+    package_path = torrent_path.parent / "mteam-prepare.json"
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "created_at": 0,
+        "input_path": str(source),
+        "prepared_path": str(source),
+        "target_prepared_path": str(source),
+        "target_filename": root_name,
+        "torrent_root_name": root_name,
+        "filename": root_name,
+        "kind": kind,
+        "files": records,
+        "torrent": {
+            "path": str(torrent_path),
+            "format": "v1",
+            "private": private,
+            "piece_length": piece_length,
+            "tracker": "",
+            "web_seed": "",
+            "comment": "",
+            "source": "",
+        },
+        "recovered_from_torrent": True,
+    }
+    package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"已从现有 torrent 恢复资料索引：{package_path}")
+    print(f"已验证 torrent 与当前媒体完全一致：{len(torrent_files)} 个文件；未重新哈希。")
+    return package_path.resolve()
 
 
 def _apply_reused_single_file_rename(
@@ -299,7 +455,11 @@ def _refresh_with_reused_torrent(
     if not source.is_file() and not source.is_dir():
         raise FileNotFoundError(f"找不到资料包对应的媒体路径：{source}")
 
-    if apply_requested and str(old_payload.get("kind") or "") == "tv":
+    if (
+        apply_requested
+        and str(old_payload.get("kind") or "") == "tv"
+        and not old_payload.get("recovered_from_torrent")
+    ):
         # A folder torrent made by prepare without --apply contains the old
         # root name.  Renaming that root now would make the reused torrent
         # invalid; require a full prepare instead.
@@ -336,6 +496,8 @@ def _refresh_with_reused_torrent(
         )
 
     refreshed["torrent"] = old_torrent
+    if old_payload.get("recovered_from_torrent"):
+        refreshed["recovered_from_torrent"] = True
     # Keep the original input reference so later automatic package lookup
     # still works even when the package was refreshed from its prepared path.
     if isinstance(old_payload.get("input_path"), str):
@@ -389,7 +551,11 @@ def main(argv: list[str] | None = None) -> None:
         try:
             package_path = _find_existing_package(args.input)
         except FileNotFoundError as exc:
-            parser.error(str(exc))
+            try:
+                torrent_path = _find_existing_torrent(args.input)
+                package_path = _recover_package_from_torrent(args.input, torrent_path)
+            except (FileNotFoundError, OSError, ValueError) as recovery_error:
+                parser.error(f"{exc}\n恢复现有 torrent 也失败：{recovery_error}")
     elif package_path is None and not args.refresh_prepare and not non_apply_options:
         try:
             package_path = _find_existing_package(args.input)
