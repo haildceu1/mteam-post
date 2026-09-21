@@ -3131,7 +3131,9 @@ def _prepare_folder(
     conflicts = [
         plan.target_path
         for plan in provisional
-        if plan.target_path.exists() and plan.target_path != plan.source_path
+        if plan.target_path.exists()
+        and plan.target_path != plan.source_path
+        and not (args.hardlink and _same_file(plan.source_path, plan.target_path))
     ]
     if conflicts:
         raise FileExistsError("目标文件已存在，未执行任何改名：" + "；".join(str(path) for path in conflicts))
