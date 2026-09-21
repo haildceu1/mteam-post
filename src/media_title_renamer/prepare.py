@@ -1997,6 +1997,48 @@ def _disc_episode(path: Path, root: Path) -> str | None:
     return f"S{season:02d}D{disc:02d}"
 
 
+def _disc_collection_key(value: str) -> str:
+    """Return a conservative title key for an automatically matched disc set.
+
+    Season/disc numbers alone are not enough when a download directory contains
+    several releases.  For example, ``Preacher.S01.D01`` and a leftover
+    ``S01_Disc_1`` both have the same numeric identity but are unrelated files.
+    Keep the meaningful release title before the first season/disc marker and
+    use it to prevent cross-release collection.  An empty key is deliberately
+    treated as unknown by the caller rather than grouping every generic
+    ``S01_Disc_N`` file in a directory.
+    """
+    text = value
+    # Site/source labels such as ``[BDshare.org]`` are not part of the title.
+    text = re.sub(r"^\s*(?:\[[^\[\]]+\][ ._-]*)+", "", text)
+
+    season_match = re.search(
+        r"(?:^|[^A-Z0-9])(?:SEASON[\s._-]*|S)0*\d{1,2}(?!\d)",
+        text,
+        re.I,
+    )
+    if season_match:
+        text = text[: season_match.start()]
+    else:
+        # JoJo and a few scene releases use only ``D01``/``Disc1`` while the
+        # season is inferred from the part subtitle.  Cut at the last disc
+        # marker so ``...Gold.Experience.2018.D01`` remains a useful key.
+        disc_matches = list(
+            re.finditer(
+                r"(?:^|[^A-Z0-9])(?:S\d{1,2}D|DISC|DISK|VOL(?:UME)?|D)[ ._-]*0*\d{1,2}(?!\d)",
+                text,
+                re.I,
+            )
+        )
+        if disc_matches:
+            text = text[: disc_matches[-1].start()]
+
+    # A year immediately before D01 is release metadata, not part of the key.
+    text = re.sub(r"[ ._-]*(?:19|20)\d{2}\s*$", "", text)
+    text = _strip_tv_disc_tokens(text)
+    return _normalise_name(text)
+
+
 def _matching_tv_disc_isos(path: Path) -> tuple[Path, list[Path]] | None:
     """Find all same-season disc ISOs beside one supplied disc.
 
@@ -2014,6 +2056,11 @@ def _matching_tv_disc_isos(path: Path) -> tuple[Path, list[Path]] | None:
     season = _season_number(context)
     if season is None:
         return None
+    collection_key = _disc_collection_key(path.stem)
+    if not collection_key:
+        # Do not guess among generic names such as S01_Disc_1.iso.  The user
+        # can pass the containing season directory when no title is available.
+        return None
     matches: list[Path] = []
     for candidate in sorted(path.parent.glob("*"), key=lambda item: item.name.casefold()):
         if not candidate.is_file() or candidate.suffix.casefold() != ".iso":
@@ -2022,6 +2069,8 @@ def _matching_tv_disc_isos(path: Path) -> tuple[Path, list[Path]] | None:
             continue
         candidate_context = " ".join((candidate.stem, *candidate.parent.parts))
         if _season_number(candidate_context) != season:
+            continue
+        if _disc_collection_key(candidate.stem) != collection_key:
             continue
         matches.append(candidate.resolve())
     if len(matches) <= 1:

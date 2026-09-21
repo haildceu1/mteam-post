@@ -224,6 +224,32 @@ class PrepareTests(unittest.TestCase):
         assert collection is not None
         self.assertEqual({path.name for path in collection[1]}, {selected.name, same_season.name})
 
+    def test_single_disc_iso_does_not_mix_generic_disc_names(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            selected = root / "[BDshare.org].Preacher.S01.D02.2016.1080p.BluRay.AVC.iso"
+            same_release = root / "[BDshare.org].Preacher.S01.D01.2016.1080p.BluRay.AVC.iso"
+            another_season = root / "[BDshare.org].Preacher.S02.D01.2017.1080p.BluRay.AVC.iso"
+            unrelated_generic_1 = root / "S01_Disc_1.iso"
+            unrelated_generic_3 = root / "S01_Disc_3.iso"
+            for path in (
+                selected,
+                same_release,
+                another_season,
+                unrelated_generic_1,
+                unrelated_generic_3,
+            ):
+                path.write_bytes(b"iso")
+
+            collection = _matching_tv_disc_isos(selected)
+
+        self.assertIsNotNone(collection)
+        assert collection is not None
+        self.assertEqual(
+            {path.name for path in collection[1]},
+            {selected.name, same_release.name},
+        )
+
     def test_jojo_disc_collection_uses_part_subtitle_to_separate_seasons(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
