@@ -3397,14 +3397,21 @@ def _prepare_folder(
             paths = non_auxiliary
     if args.remain:
         auxiliary_paths = [
-            path for path in paths if sample_or_extra(path.relative_to(root))
+            path
+            for path in paths
+            if sample_or_extra(path.relative_to(root))
+            or any(
+                part.casefold() == "other"
+                for part in path.relative_to(root).parts[:-1]
+            )
         ]
         if auxiliary_paths:
             auxiliary_set = set(auxiliary_paths)
             paths = [path for path in paths if path not in auxiliary_set]
             print(
                 f"保持模式识别到附加视频 {len(auxiliary_paths)} 个："
-                "原文件名和目录会随原始文件一并保留并纳入种子，不参与正片季集号校验或媒体信息采样。"
+                "包括 Other 等附加目录；原文件名和目录会随原始文件一并保留并纳入种子，"
+                "不参与正片季集号校验或媒体信息采样。"
             )
     if not paths:
         if args.remain:
