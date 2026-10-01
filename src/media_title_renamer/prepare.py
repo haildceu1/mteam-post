@@ -3395,7 +3395,30 @@ def _prepare_folder(
             if excluded:
                 print(f"忽略样片/附加视频 {len(excluded)} 个；文件清单仍保留在审计记录中。")
             paths = non_auxiliary
+    if args.remain:
+        auxiliary_paths = [
+            path
+            for path in paths
+            if sample_or_extra(path.relative_to(root))
+            or any(
+                part.casefold() == "other"
+                for part in path.relative_to(root).parts[:-1]
+            )
+        ]
+        if auxiliary_paths:
+            auxiliary_set = set(auxiliary_paths)
+            paths = [path for path in paths if path not in auxiliary_set]
+            print(
+                f"保持模式识别到附加视频 {len(auxiliary_paths)} 个："
+                "包括 Other 等附加目录；原文件名和目录会随原始文件一并保留并纳入种子，"
+                "不参与正片季集号校验或媒体信息采样。"
+            )
     if not paths:
+        if args.remain:
+            raise ValueError(
+                "没有找到可识别的正片视频；保持模式下识别到的幕后/花絮视频会原样留在种子中，"
+                "但不能单独用于生成剧集发布资料"
+            )
         raise ValueError("目录中没有找到支持的视频文件")
 
     probes: list[tuple[Path, FilenameHints]] = []
