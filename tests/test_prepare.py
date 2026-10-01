@@ -5,19 +5,23 @@ import os
 import subprocess
 import tempfile
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from media_title_renamer.cli import MediaInfo
+from media_title_renamer.ai import AIIdentity
 
 from media_title_renamer.prepare import (
+    _get_json,
     _bdinfo_list_command,
     _bdinfo_scan_command,
     _bracket_release_group,
     _disc_episode,
     _clean_disc_marker_from_edition,
     _choose_douban,
+    _choose_tmdb,
     _confirm_rename_preview,
     _douban_search_page_candidates,
     _douban_candidates,
@@ -59,6 +63,211 @@ from media_title_renamer.prepare import (
 
 
 class PrepareTests(unittest.TestCase):
+    def test_tmdb_transient_connection_failure_retries_once(self):
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def read(self): return b'{"id": 42}'
+        with patch('media_title_renamer.prepare.urllib.request.urlopen',
+                   side_effect=[urllib.error.URLError('SSL EOF'), Response()]) as request, \
+             patch('media_title_renamer.prepare.time.sleep') as pause:
+            result = _get_json('https://api.themoviedb.org/3/movie/42')
+        self.assertEqual(result, {'id': 42})
+        self.assertEqual(request.call_count, 2)
+        pause.assert_called_once()
+
+    def test_douban_http_failure_does_not_retry(self):
+        with patch('media_title_renamer.prepare.urllib.request.urlopen',
+                   side_effect=urllib.error.HTTPError('url',429,'limited',None,None)) as request:
+            with self.assertRaises(urllib.error.HTTPError):
+                _get_json('https://movie.douban.com/j/subject_suggest?q=test')
+        request.assert_called_once()
+
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    @patch("media_title_renamer.prepare._resolve_fields")
+    def test_gpt_confirmed_remain_tv_can_map_contiguous_bare_episode_names(
+        self, resolve_fields_mock, read_mediainfo_mock, prepare_technical_info_mock
+    ):
+        media = MediaInfo(
+            width=854,
+            height=480,
+            resolution="480p",
+            video_format="Xvid",
+            writing_library="",
+            video_codec="Xvid",
+            hdr=(),
+            hfr=None,
+            audio_codec="MP3",
+            audio_channels="2.0",
+            audio_tracks=1,
+            audio_bitrate=128000,
+            audio_language="en",
+        )
+        read_mediainfo_mock.return_value = media
+        prepare_technical_info_mock.return_value = (
+            "MediaInfo",
+            "General\\nComplete name : brides1.avi\\n",
+            Path("temporary-mediainfo.txt"),
+            None,
+        )
+
+        def resolve(args, path, _media):
+            args._gpt_identity = AIIdentity(
+                search_title="Brides of Christ",
+                title="Brides of Christ",
+                year="1991",
+                kind="tv",
+                confidence=0.96,
+            )
+            args._gpt_assistant = None
+            return "Brides of Christ", "1991", "WEB-DL", "NOGRP", None, None, None
+
+        resolve_fields_mock.side_effect = resolve
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Brides.of.Christ.1991.480P.WEB.Xvid"
+            root.mkdir()
+            for number in range(1, 7):
+                (root / f"brides{number}.avi").write_bytes(b"episode content")
+            samples = root / "Sample"
+            samples.mkdir()
+            (samples / "sample.avi").write_bytes(b"sample content")
+            output = Path(directory) / "metadata"
+            before_names = sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
+
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root), "--kind", "tv", "--gpt", "--allow-inferred-episodes",
+                        "--exclude-sample-content", "--remain", "--offline",
+                        "--skip-screenshots", "--skip-torrent", "--output", str(output),
+                    ]
+                )
+
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+            after_names = sorted(path.relative_to(root).as_posix() for path in root.rglob("*"))
+
+        self.assertEqual(before_names, after_names)
+        self.assertEqual(len(payload["files"]), 6)
+        self.assertEqual(payload["episode_mapping"]["entries"]["brides1.avi"], "S01E01")
+        self.assertEqual(payload["episode_mapping"]["entries"]["brides6.avi"], "S01E06")
+        self.assertNotIn("Sample/sample.avi", [item["source_path"] for item in payload["files"]])
+
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_remain_mode_keeps_single_file_name_and_skips_rename_backup(
+        self, prepare_technical_info_mock, read_mediainfo_mock
+    ):
+        media = MediaInfo(
+            width=1920,
+            height=1080,
+            resolution="1080p",
+            video_format="AVC",
+            writing_library="",
+            video_codec="AVC",
+            hdr=(),
+            hfr=None,
+            audio_codec="DD",
+            audio_channels="5.1",
+            audio_tracks=1,
+            audio_bitrate=640000,
+            audio_language="en",
+        )
+        read_mediainfo_mock.return_value = media
+        prepare_technical_info_mock.return_value = (
+            "MediaInfo",
+            "General\nComplete name : original.mkv\n",
+            Path("temporary-mediainfo.txt"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Original.Release.2024.1080p.HDTV.AVC.DD5.1-GRP.mkv"
+            source.write_bytes(b"source bytes")
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(source),
+                        "--title",
+                        "Original Release",
+                        "--year",
+                        "2024",
+                        "--source",
+                        "HDTV",
+                        "--offline",
+                        "--remain",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                    ]
+                )
+
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+            self.assertTrue(source.is_file())
+            self.assertEqual(payload["prepared_path"], str(source))
+            self.assertEqual(payload["filename"], source.name)
+            self.assertTrue(payload["remain_mode"])
+            self.assertEqual(payload["rename_backup_path"], "")
+            self.assertFalse((source.parent / "Original Release 2024 HDTV 1080p AVC DD5.1-GRP.mkv").exists())
+
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_remain_mode_keeps_tv_folder_and_episode_names(
+        self, prepare_technical_info_mock, read_mediainfo_mock
+    ):
+        media = MediaInfo(
+            width=1280,
+            height=720,
+            resolution="720p",
+            video_format="H.264",
+            writing_library="",
+            video_codec="H.264",
+            hdr=(),
+            hfr=None,
+            audio_codec="AAC",
+            audio_channels="2.0",
+            audio_tracks=1,
+            audio_bitrate=128000,
+            audio_language="en",
+        )
+        read_mediainfo_mock.return_value = media
+        prepare_technical_info_mock.return_value = (
+            "MediaInfo",
+            "General\nComplete name : episode.mkv\n",
+            Path("temporary-mediainfo.txt"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Original Show S01"
+            root.mkdir()
+            first = root / "Original.Show.S01E01.mkv"
+            second = root / "Original.Show.S01E02.mkv"
+            first.write_bytes(b"episode one")
+            second.write_bytes(b"episode two")
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root),
+                        "--title",
+                        "Original Show",
+                        "--year",
+                        "2024",
+                        "--source",
+                        "HDTV",
+                        "--offline",
+                        "--remain",
+                        "--skip-screenshots",
+                        "--skip-torrent",
+                    ]
+                )
+
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+            self.assertEqual(root.name, "Original Show S01")
+            self.assertEqual(sorted(item.name for item in root.iterdir()), sorted([first.name, second.name]))
+            self.assertTrue(payload["remain_mode"])
+            self.assertEqual(
+                sorted(item["filename"] for item in payload["files"]),
+                sorted([first.name, second.name]),
+            )
+
     @patch("media_title_renamer.prepare.read_mediainfo")
     @patch("media_title_renamer.prepare.prepare_technical_info")
     def test_hardlink_folder_apply_keeps_source_tree_and_materializes_canonical_tree(
@@ -341,10 +550,100 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
 
     def test_douban_empty_success_response_is_reported_as_possible_throttle(self):
         diagnostics: list[str] = []
-        with patch("media_title_renamer.prepare._get_json", return_value=[]):
+        with patch("media_title_renamer.prepare._get_json", return_value=[]), patch(
+            "media_title_renamer.prepare._douban_search_page_candidates", return_value=[]
+        ):
             candidates = _douban_candidates(["Tip Toe"], "2026", diagnostics=diagnostics)
         self.assertEqual(candidates, [])
         self.assertIn("HTTP 200 返回空结果（疑似豆瓣频控/风控，非 HTTP 403/429）", diagnostics)
+
+    def test_logged_in_html_exact_match_precedes_empty_suggest_requests(self):
+        candidate = DoubanMatch(
+            "3011235", "https://movie.douban.com/subject/3011235/",
+            "哈利·波特与死亡圣器(下)",
+            "Harry Potter and the Deathly Hallows: Part 2", "2011", 82,
+            source="html_search",
+        )
+        with (
+            patch("media_title_renamer.prepare._douban_request_headers", return_value={"Cookie": "redacted"}),
+            patch("media_title_renamer.prepare._douban_search_page_candidates", return_value=[candidate]) as page,
+            patch("media_title_renamer.prepare._get_json", side_effect=AssertionError("unneeded suggest request")),
+        ):
+            rows = _douban_candidates(["Harry Potter and the Deathly Hallows Part 2"], "2011")
+        self.assertEqual([row.id for row in rows], ["3011235"])
+        self.assertEqual(page.call_count, 1)
+
+    def test_douban_season_search_stops_after_rate_limit_diagnostic(self):
+        diagnostics: list[str] = []
+        with (
+            patch("media_title_renamer.prepare._get_json", return_value=[]),
+            patch(
+                "media_title_renamer.prepare._douban_search_page_candidates",
+                side_effect=lambda query, year, diagnostics=None: (
+                    diagnostics.append("豆瓣普通搜索页返回：搜索访问太频繁。") or []
+                ),
+            ) as page_search,
+        ):
+            _douban_candidates(
+                ["Example Show", "Example Show Season 1", "Original Alias"],
+                "2024",
+                expected_season=1,
+                diagnostics=diagnostics,
+            )
+        self.assertEqual(page_search.call_count, 1)
+
+    def test_movie_search_falls_back_to_year_qualified_html_results(self):
+        remake = DoubanMatch(
+            "27203644",
+            "https://movie.douban.com/subject/27203644/",
+            "尼罗河上的惨案",
+            "Death on the Nile",
+            "2022",
+            75,
+            source="suggest",
+        )
+        original = DoubanMatch(
+            "1302100",
+            "https://movie.douban.com/subject/1302100/",
+            "尼罗河上的惨案",
+            "Death on the Nile",
+            "1978",
+            71,
+            source="html_search",
+        )
+        with (
+            patch("media_title_renamer.prepare._get_json", return_value=[{
+                "id": "27203644",
+                "title": "尼罗河上的惨案",
+                "sub_title": "Death on the Nile",
+                "year": "2022",
+            }]),
+            patch("media_title_renamer.prepare._douban_search_page_candidates", return_value=[original]) as html_search,
+        ):
+            candidates = _douban_candidates(["Death on the Nile"], "1978")
+
+        html_search.assert_called_once()
+        self.assertEqual({item.id for item in candidates}, {"27203644", "1302100"})
+        self.assertIs(
+            _choose_douban(
+                candidates,
+                expected_titles=["Death on the Nile"],
+                expected_year="1978",
+            ),
+            original,
+        )
+
+    def test_movie_douban_selection_rejects_same_title_wrong_remake_year(self):
+        remake = DoubanMatch(
+            "27203644", "", "尼罗河上的惨案", "Death on the Nile", "2022", 100
+        )
+        self.assertIsNone(
+            _choose_douban(
+                [remake],
+                expected_titles=["Death on the Nile"],
+                expected_year="1978",
+            )
+        )
 
     @patch("media_title_renamer.prepare.generate_bdinfo_report")
     def test_unTagged_bluray_iso_uses_bdinfo_before_filename_fallback(self, generate_bdinfo):
@@ -488,6 +787,18 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
             candidates = _douban_search_page_candidates("Tip Toe", "2026", diagnostics=diagnostics)
         self.assertEqual(candidates, [])
         self.assertIn("豆瓣普通搜索页返回：搜索访问太频繁。", diagnostics)
+
+    def test_douban_search_page_year_suffix_does_not_lower_title_score(self):
+        html = '<script>window.__DATA__ = ' + json.dumps({"items": [{
+            "id": 3011235,
+            "title": "Harry Potter and the Deathly Hallows Part 2 (2011)",
+            "year": "2011",
+            "url": "https://movie.douban.com/subject/3011235/",
+        }]}) + ';</script>'
+        with patch("media_title_renamer.prepare._get_text", return_value=html):
+            rows = _douban_search_page_candidates("Harry Potter and the Deathly Hallows Part 2 2011", "2011")
+        self.assertEqual(rows[0].id, "3011235")
+        self.assertGreaterEqual(rows[0].score, 90)
 
     def test_douban_selection_rejects_a_different_season(self):
         wrong = DoubanMatch("50", "https://movie.douban.com/subject/50/", "幸存者 第五十季", "Survivor Season 50", "2025", 100, 50)
@@ -661,6 +972,26 @@ DTS-HD Master Audio English / 2.0 / 1500 kbps
         self.assertIn("Survivor", choose.call_args.kwargs["expected_titles"])
         self.assertIn("幸存者 真人秀", choose.call_args.kwargs["expected_titles"])
         self.assertIn("Survivor Pearl Islands", names)
+
+    def test_later_tv_season_does_not_search_with_series_premiere_year(self):
+        args = type("Args", (), {"douban_url": None, "offline": False})()
+        tmdb = TmdbMatch(
+            id=1, media_type="tv", name="Westworld", chinese_name="西部世界",
+            original_name="Westworld", original_language="en", year="2016",
+            imdb_id="", genre_ids=(), score=100,
+        )
+        candidate = DoubanMatch(
+            "35042913", "https://movie.douban.com/subject/35042913/",
+            "西部世界 第四季", "Westworld Season 4", "2022", 90, 4,
+        )
+        with (
+            patch("media_title_renamer.prepare._tmdb_season_for_release", return_value=None),
+            patch("media_title_renamer.prepare._douban_candidates", return_value=[candidate]) as search,
+        ):
+            result = _douban_for_release(args, tmdb=tmdb, title="Westworld",
+                                         base_title="Westworld", year="2016", season_number=4)
+        self.assertIs(result, candidate)
+        self.assertIsNone(search.call_args.args[1])
 
     def test_series_folder_name_follows_mteam_template(self):
         self.assertEqual(
@@ -1463,6 +1794,36 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         self.assertEqual(
             infer_mteam_category(kind="tv", source="WEB-DL", resolution="1080p", animation=True),
             "动画",
+        )
+        self.assertEqual(
+            infer_mteam_category(
+                kind="tv", source="DVD", resolution="480p", animation=False, dvd_iso=False
+            ),
+            "影剧/综艺/SD",
+        )
+        self.assertEqual(
+            infer_mteam_category(
+                kind="tv", source="DVD9", resolution="480p", animation=False, dvd_iso=True
+            ),
+            "影剧/综艺/DVDiSo",
+        )
+
+    def test_tmdb_strict_year_rejects_distant_same_title_tv_result(self):
+        wrong = TmdbMatch(
+            id=1, media_type="tv", name="7 Days", chinese_name="7 Days",
+            original_name="7 Days", original_language="en", year="2009",
+            imdb_id="", genre_ids=(), score=90,
+        )
+        right = TmdbMatch(
+            id=2, media_type="tv", name="7 Days", chinese_name="7 Days",
+            original_name="7 Days", original_language="en", year="1998",
+            imdb_id="", genre_ids=(), score=80,
+        )
+
+        self.assertIsNone(_choose_tmdb([wrong], expected_year="1998", strict_year=True))
+        self.assertEqual(
+            _choose_tmdb([wrong, right], expected_year="1998", strict_year=True),
+            right,
         )
 
     def test_subtitle_contains_chinese_original_name_and_source_language(self):

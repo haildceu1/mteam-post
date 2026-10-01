@@ -376,6 +376,49 @@ This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 `prepare` 完成后，可用 ChromeDriver 打开已登录页面并填入资料。程序会上传种子和截图（需要 `--upload`），但永远停在最终发布按钮之前：
 
+### CLIProxyAPI 辅助识别（可选）
+
+默认不会调用大模型。启用 `--gpt` 后，程序会在 TMDB/豆瓣搜索前把文件名、父目录名和精简 MediaInfo 发送到本机 CLIProxyAPI，先提取主标题、年份、类型、季集、来源和发布组，再用主标题搜索 TMDB/豆瓣；豆瓣出现多个可信候选时会再次让模型选择。模型不可用、超时或返回格式错误时只回退到现有规则识别，不会阻止普通流程。
+
+需要联网核验时，再追加 `--web-search`。该开关会把请求切换到 CLIProxyAPI 的 OpenAI Responses 接口，并提供其托管 `web_search` 工具；识别和豆瓣候选消歧都可以使用联网结果。CLIProxyAPI 或当前模型不支持该工具时会明确打印警告并回退到普通 GPT，不会把“未联网”误报成已联网。
+
+当前主机的 CLIProxyAPI 配置可以这样指定（不要把 key 写入命令行或提交到 Git）：
+
+```bash
+export CLIPROXY_CONFIG="/data/Zhyw/qwen_mods/CLIProxyAPI-runtime/config.yaml"
+export CLIPROXY_API_KEY_FILE="/data/Zhyw/qwen_mods/CLIProxyAPI-runtime/api-key"
+export CLIPROXY_MODEL="gpt-6-luna"
+export CLIPROXY_REASONING_EFFORT="medium"
+```
+
+程序默认读取上述配置路径和同目录 `api-key`，本机 `127.0.0.1` 请求不会绕行 Clash；远端 CLIProxyAPI 才会遵循系统代理环境变量。可用 `CLIPROXY_BASE_URL`、`CLIPROXY_HOST`、`CLIPROXY_PORT` 和 `CLIPROXY_TIMEOUT` 覆盖默认值。请求中不发送视频内容，也不会在输出中打印 API key。
+
+例如：
+
+```bash
+# 默认仍会生成重命名预览；--gpt 只打开辅助识别
+media-title-rename publish "/data/media/Westworld.S03" --gpt --apply --no-upload
+
+# 在辅助识别前允许 CLIProxyAPI 调用托管 web_search；仍然不自动发布
+media-title-rename prepare "/data/media/Westworld.S03" --gpt --web-search --remain
+```
+
+### 保持原文件名模式
+
+`--remain` 会跳过重命名和硬链接，直接用当前目录/文件名完成识别、MediaInfo、截图、V1 私有种子和发布资料包；种子内部也沿用当前文件名和目录树。它适合不希望改动现有媒体库的单个条目，不能与 `--hardlink` 同时使用。发布页仍会使用自动生成的规范 M-Team 标题作为标题字段。
+
+```bash
+# 识别、准备并打开 M-Team 填写页；不会要求 --apply
+media-title-rename publish "/data/media/Brides.of.Christ.1991.480P.WEB.Xvid.mkv" \
+  --gpt --remain
+
+# 只生成本地资料包，不打开浏览器
+media-title-rename prepare "/data/media/Brides.of.Christ.1991.480P.WEB.Xvid.mkv" \
+  --gpt --remain
+```
+
+`--gpt` 和 `--remain` 只对原始媒体路径生效；直接传入已有 `mteam-prepare.json` 时会拒绝这两个参数，避免误以为资料包会重新识别。
+
 ```powershell
 media-title-rename mteam-fill "F:\TV\20.22.prepare\mteam-prepare.json" `
   --cookie-file "C:\Secrets\mteam-cookie.txt" `
@@ -659,3 +702,152 @@ python -m pip install -e .
 # 错误：会被当成多一级目录
 "D:\Movie\Film-fda80\@CHDBits.iso"
 ```
+# Add an already-published M-Team torrent to qBittorrent
+
+### 发布后按详情页 ID 召回官方种子
+
+`publish` 默认仍停在预览。明确添加 `--submit` 后，程序校验页面、
+提交一次，并直接读取跳转详情页的 ID。通过现有 MoviePilot 容器里的 M-Team
+站点配置和已安装的 `MTorrentSpider` 构造下载请求，无需该条目先被搜索收录。
+默认随后将官方种子添加至 qB，标签为 `Mteam`；先暂停、跳过 hash 校验，
+核对容器映射、设备号/inode、完整文件清单和大小后才启动做种。
+`--no-qb` 关闭加种，`--no-qb --recall-official` 则只召回官方种子。
+认证和签名链接不写入日志或报告。
+
+```bash
+media-title-rename publish /path/to/mteam-prepare.json \
+  --yes --submit --moviepilot-container moviepilot --site-id 1
+```
+
+**不需要事先生成 JSON**，可直接输入视频文件或剧集目录，一次完成资料获取、
+发布、官方种子召回及 qB 做种。`--remain` 不改名、不整理；`--gpt` 启用 AI：
+
+```bash
+media-title-rename publish '/path/to/original/resource' \
+  --remain --gpt --yes --submit --output '/path/to/workspace/prepare-output'
+```
+
+预览时去掉 `--submit`，不会最终发布或向 qB 添加任务。
+只有资料和站内表单校验通过才会提交；低置信度或缺字段不会强行发布。
+动画资料包还必须提供 `bangumi_url`（例如 `https://bgm.tv/subject/266455`），
+发布前会核对站内 Bangumi 选中项；不能用豆瓣链接代替。
+截图上传明确失败时，最多移除该失败项并重试两次；上传结果不明时停止，
+不会重复请求或绕过四张截图校验。
+
+成功后资料包旁保存 `publish-result.json` 和 `official-<ID>.torrent`。
+下载会核对原资源的完整路径/大小清单和上传种子的分片哈希，支持多季多文件。
+若发布成功而召回/做种失败，复用同一资料包和结果文件会从未完成阶段继续；
+官方种子已缓存时不重复下载，已有相同 qB hash 时验证并复用，不重复加种。
+提交结果不明时停止重复发布。独立 `recall-official` 命令仍然只下载、不添加 qB。
+单独下载已经发布的条目可以使用：
+
+```bash
+media-title-rename recall-official https://kp.m-team.cc/detail/1234567 \
+  --source '/path/to/original/resource' --output '/path/to/official-1234567.torrent'
+```
+
+For a torrent that has already been published, `seed-official` opens the M-Team
+detail page with the configured Chrome profile, uses its copy-link button, and
+passes the signed link only through memory. It downloads the official `.torrent`
+to memory, checks the exact single-file name and byte size, then talks directly
+to qBittorrent's WebUI API (not MoviePilot). qB is asked to add it paused with
+hash checking skipped. The task is tagged `Mteam` and resumed only after its
+save path and file manifest match the existing TL file.
+
+Example for the already-published Threads 1984 torrent:
+
+```sh
+media-title-rename seed-official 1261708 \
+  /data/Zhyw/media-stack/downloads/TL/Threads.1984.UHD.BluRay.2160p.FLAC.2.0.DV.HEVC.HYBRID.REMUX-FraMeSToR/Threads.1984.UHD.BluRay.2160p.FLAC.2.0.DV.HEVC.HYBRID.REMUX-FraMeSToR.mkv \
+  --expected-size 79154150362 \
+  --expected-page-title "Threads 1984"
+```
+
+The command reads qB's WebUI API key from its local `qBittorrent.conf`; it does
+not print or persist the key or signed URL. It leaves any pre-existing qB task
+with the same info hash untouched. It never publishes to M-Team or changes the
+TL source file. The explicit skip-checking option means qB does not verify the
+payload pieces; the command verifies only the torrent metadata, path, file list,
+and size.
+
+### 无交互 AI 审核：`auto`
+
+从资源路径运行完整预览（保持原文件名，不整理、不复制源文件）：
+
+```bash
+media-title-rename auto '/path/to/movie.mkv-or-tv-directory' \
+  --gpt --preview --output '/path/to/workspace/task'
+```
+
+仅测试身份和发布字段、跳过截图与制种时加 `--metadata-only`。
+已有资料包也可作为输入：`auto /path/to/mteam-prepare.json --gpt --preview --output /path/to/new-task`。
+`--web-search` 可选；服务不支持联网工具时沿用普通模型调用，报告记录实际是否联网。
+CLIProxyAPI 地址、模型与密钥沿用 `--gpt` 的配置，密钥不会写入审核文件。
+
+处理顺序为：模型提取作品搜索词 → TMDB/豆瓣真实候选搜索与媒体探测 →
+动画 Bangumi 候选搜索 → 模型审核作品身份、年份、季数与候选 ID → 程序校验资料及附件。
+测量所得编码、分辨率和音轨语言不能被模型覆盖；普通动画 MKV 归入“动画”，不是动画原盘。
+豆瓣和 Bangumi URL 只能从真实候选 ID 构建。找不到可靠条目、模型低置信度、缺附件、
+类型冲突或服务异常均返回结构化 `pending`，不要求终端交互，也不会猜测条目。
+分卷及其他压缩包资源返回 `unsupported`。大于 200 GiB 的资源停止制备。
+
+任务目录内保存 `input-schema.json`、`output-schema.json`、`ai-input.json`、
+`ai-output.json`、审核后的 `mteam-prepare.json`、`review.json` 与前后源文件清单。
+模型输出采用严格 JSON 字段集合：版本、状态、置信度、类型、豆瓣/Bangumi 候选 ID、理由、问题。
+`review.json` 的 `ready` 表示完整预览校验通过；`metadata_ready` 仅表示资料字段通过，不能发布。
+成功退出码为 0；待确认、不支持或外部失败为 2。缓存限制在任务目录，禁止 `/tmp` 输出。
+
+只有明确使用 `--submit` 才调用已有发布/召回流程（该流程默认也会添加 qB）；
+`--metadata-only` 禁止与 `--submit` 同用。已知发布 ID 只允许续接召回；限流、重复种子、
+提交结果不明均停止盲目重发。`auto` 的完全脚本化不代表所有资源必然能够自动通过审核。
+
+#### 自动发布、官方种子召回和 qB 添加
+
+```bash
+media-title-rename auto '/path/to/movie.mkv-or-tv-directory' \
+  --gpt --submit --output '/path/to/workspace/task'
+```
+
+仍然保持源目录和文件名。资料验证通过后自动查重、填发布页并提交一次，从跳转详情页
+获取 M-Team ID，使用 MoviePilot 内已有站点配置召回官方 `.torrent`（不依赖候选种子的搜索可见性）。
+本地制种仅用于上传，绝不替代官方种子添加到 qB。自动核对原始完整文件清单及上传种子的
+分片元数据，以暂停、跳过 hash 校验方式加入 qB，再核对容器路径、大小、inode 和全部文件后
+添加 `Mteam` 标签并启动做种。没有匹配的容器挂载或校验失败时停止，不删除源文件。
+
+`--preview` 不发布、不召回、不加 qB；`--metadata-only` 不能与 `--submit` 同用。
+批量自动流程的默认片源规则是：明确 REMUX 保留 REMUX；实际 Blu-ray ISO/BDMV
+按光盘处理；其余普通视频统一按 WEB-DL。`--remain` 的多季目录只按明确的季文件夹
+确定整包季范围，不需要内部文件具备连续集号，也不会更改其文件名。
+同一资源使用相同 `--output` 从 `--preview` 切换到 `--submit` 时，若预览为 `ready`、
+源文件指纹一致、已保存的模型审核及资料一致，并且截图、MediaInfo 和上传种子仍完整，
+会复用预览，跳过重复 AI 调用、媒体探测、截图和制种；提交前仍执行最新 M-Team 查重及页面校验。
+直接输入已审核的 `mteam-prepare.json` 时，即使提交输出目录不同，也会读取资料包旁的审核记录。
+只生成字段的 `metadata_ready` 或资料/源文件已变化时不能沿用完整预览。需要重新识别时可加 `--refresh`；
+已有发布 ID 的任务仍只续接召回，不重复发布。
+可用 `--moviepilot-container`、`--site-id`、`--qb-container`、`--qb-url`、`--qb-config`、
+`--profile-dir` 覆盖已有运行配置。`--login-timeout` 默认 30 秒，自动流程不会无限等待人工登录。
+浏览器需要已有登录态；不会索取或输出站点密钥。
+
+豆瓣普通搜索遇到风控时，可指定既有登录文件并启用联网回退：
+
+```bash
+media-title-rename auto '/path/to/resource' --gpt --web-search --submit \
+  --douban-cookie-file '/path/to/existing/douban.xlsx' \
+  --output '/path/to/workspace/task'
+```
+
+Cookie 仅在内存中读取。联网工具无法使用时会记录失败；公共搜索的 URL 也必须独立核验
+真实豆瓣页面后才能成为候选。若模型找到 URL 但豆瓣详情页重定向、限流或无法核验，
+`review.json` 只记录不含凭据的候选 ID 和失败状态，仍保持待确认，不自动发布。
+审核选中的候选信息会保存回资料包，后续提交不重复丢失。
+
+源资源的锁和发布记录索引默认位于 `/data/Zhyw/media-stack/downloads/.mteam-transfer/auto-state`，
+可用 `MTEAM_AUTO_STATE_DIR` 指定另一个工作区路径。即使换了输出目录，已发布的资源也只续接
+官方种子召回和 qB 校验，不重新识别、截图、制种或再次发布。结果不明则停止，禁止盲目重发。
+对同一资源同时运行两个提交命令会返回 `resource_busy`。
+
+深层任务目录可能让 Chrome 的 Unix socket 路径超长。浏览器临时目录使用工作区下的短路径
+`/data/Zhyw/media-stack/.chrome-tmp/auto-<资源摘要>`，可通过 `MTEAM_CHROME_TMPDIR` 覆盖；不使用 `/tmp`。
+官方 API 下载入口必须匹配详情页 ID；仅允许 HTTPS 和明确列入允许列表的官方 API/CDN 重定向，
+签名 URL 不写入日志或报告。`review.json` 显示当前阶段、最终 ID、qB hash 和失败原因；
+发布前完整页面截图与 `publish-result.json`、官方种子保存在任务目录。

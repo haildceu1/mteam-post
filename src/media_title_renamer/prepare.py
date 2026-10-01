@@ -25,6 +25,7 @@ from .cli import (
     FilenameHints,
     MediaInfo,
     _canonical_source,
+    _autonomous_source,
     _find_mediainfo,
     _is_release_prefix_label,
     _resolve_fields,
@@ -33,6 +34,9 @@ from .cli import (
     filename_hints,
     read_mediainfo,
 )
+from .douban_cookie import DoubanCookieError, load_douban_cookie_header
+from .douban_rate import pace_douban_request
+from .episode_mapping import episode_mapping_issues, episode_number_hint, sample_or_extra, season_folder_map, season_number_hint, sequential_episode_map
 
 
 MTEAM_CATEGORIES = (
@@ -65,6 +69,9 @@ LANGUAGE_NAMES = {
     "it": "意大利语",
     "ja": "日语",
     "ko": "韩语",
+    "myn": "玛雅语系",
+    "mya": "缅甸语",
+    "bur": "缅甸语",
     "nl": "荷兰语",
     "no": "挪威语",
     "pl": "波兰语",
@@ -112,6 +119,7 @@ class DoubanMatch:
     year: str
     score: float
     season_number: int | None = None
+    source: str = ""
 
 
 @dataclass(frozen=True)
@@ -166,8 +174,19 @@ def _get_json(url: str, headers: dict[str, str] | None = None, timeout: int = 12
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(url, headers=request_headers)
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    pace_douban_request(url)
+    tmdb = urllib.parse.urlsplit(url).hostname == 'api.themoviedb.org'
+    for attempt in range(2 if tmdb else 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError:
+            raise
+        except (urllib.error.URLError, TimeoutError, OSError):
+            if not tmdb or attempt:
+                raise
+            time.sleep(1)
+    raise RuntimeError('unreachable')
 
 
 def _get_text(url: str, headers: dict[str, str] | None = None, timeout: int = 12) -> str:
@@ -175,6 +194,7 @@ def _get_text(url: str, headers: dict[str, str] | None = None, timeout: int = 12
     if headers:
         request_headers.update(headers)
     request = urllib.request.Request(url, headers=request_headers)
+    pace_douban_request(url)
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
 
@@ -265,7 +285,12 @@ class TmdbClient:
             if series_title and series_title.casefold() not in {item.casefold() for item in queries}:
                 queries.append(series_title)
         for query in queries:
-            params = {"query": query, "language": "zh-CN", "include_adult": "false"}
+            # Score against a title in the query's language. With zh-CN for
+            # an English release of a Chinese/Japanese film, both returned
+            # title fields can be non-English (e.g. Armour of God / 龍兄虎弟),
+            # incorrectly rejecting the right work before fetching details.
+            language = "zh-CN" if _contains_cjk(query) else "en-US"
+            params = {"query": query, "language": language, "include_adult": "false"}
             if year and media_type != "tv":
                 params["year"] = year
             data = self._get(f"/search/{endpoint}", **params)
@@ -297,9 +322,30 @@ class TmdbClient:
         return matches
 
 
-def _choose_tmdb(candidates: list[TmdbMatch]) -> TmdbMatch | None:
+def _choose_tmdb(
+    candidates: list[TmdbMatch],
+    *,
+    expected_year: str | None = None,
+    strict_year: bool = False,
+) -> TmdbMatch | None:
     if not candidates:
         return None
+    if strict_year and expected_year:
+        try:
+            expected = int(expected_year)
+            compatible = [
+                item for item in candidates
+                if item.year and abs(int(item.year) - expected) <= 1
+            ]
+        except ValueError:
+            compatible = candidates
+        if not compatible:
+            print(
+                f"提示：TMDB 候选年份与资源年份 {expected_year} 不符；"
+                "为避免同名误配，已跳过 TMDB 自动选择。"
+            )
+            return None
+        candidates = compatible
     top = candidates[0]
     ambiguous = len(candidates) > 1 and top.score - candidates[1].score < 8
     if top.score >= 85 and not ambiguous:
@@ -350,13 +396,19 @@ def _douban_search_page_candidates(
 ) -> list[DoubanMatch]:
     """Search Douban's regular result page, which includes TV-season entries."""
     url = "https://search.douban.com/movie/subject_search?search_text=" + urllib.parse.quote(query)
-    text = _get_text(url, headers=_DOUBAN_HEADERS)
+    text = _get_text(url, headers=_douban_request_headers(diagnostics))
     marker = "window.__DATA__"
     start = text.find(marker)
     if start < 0:
+        message = "豆瓣网页搜索没有返回结构化结果数据（可能是风控页或页面结构变化）"
+        if diagnostics is not None and message not in diagnostics:
+            diagnostics.append(message)
         return []
     payload_start = text.find("{", start)
     if payload_start < 0:
+        message = "豆瓣网页搜索响应缺少候选数据"
+        if diagnostics is not None and message not in diagnostics:
+            diagnostics.append(message)
         return []
     data, _end = json.JSONDecoder().raw_decode(text[payload_start:])
     error_info = str(data.get("error_info") or "").strip()
@@ -377,7 +429,11 @@ def _douban_search_page_candidates(
             abstract,
             str(item.get("year") or ""),
         )
-        score = _match_score(query, [title, original, raw_title, abstract], year, item_year)
+        # The year is a search filter, not part of the work's title. Including
+        # it in the fuzzy comparison can push an exact match below the early
+        # accept threshold and cause needless follow-up requests.
+        score_query = re.sub(r"\s+(?:19|20)\d{2}$", "", query).strip() if year else query
+        score = _match_score(score_query, [title, original, raw_title, abstract], year, item_year)
         found.append(
             DoubanMatch(
                 id=item_id,
@@ -387,9 +443,40 @@ def _douban_search_page_candidates(
                 year=item_year,
                 score=score,
                 season_number=season,
+                source="html_search",
             )
         )
+    if not found and not error_info and diagnostics is not None:
+        message = "豆瓣网页搜索正常返回 0 个候选；这不等同于已证明豆瓣不存在该条目"
+        if message not in diagnostics:
+            diagnostics.append(message)
     return found
+
+
+def _douban_request_headers(diagnostics: list[str] | None = None) -> dict[str, str]:
+    """Build request headers and optionally attach the configured user cookie.
+
+    Cookie values are deliberately never interpolated into exceptions, logs,
+    result metadata, or URLs.
+    """
+    headers = dict(_DOUBAN_HEADERS)
+    cookie_path = os.environ.get("DOUBAN_COOKIE_FILE", "").strip()
+    if not cookie_path:
+        return headers
+    try:
+        cookie = load_douban_cookie_header(cookie_path)
+    except DoubanCookieError as exc:
+        message = f"豆瓣 Cookie 未能加载：{exc}"
+        if diagnostics is not None and message not in diagnostics:
+            diagnostics.append(message)
+        return headers
+    if cookie:
+        headers["Cookie"] = cookie
+        return headers
+    message = "豆瓣 Cookie 文件中没有有效的 douban.com Cookie"
+    if diagnostics is not None and message not in diagnostics:
+        diagnostics.append(message)
+    return headers
 
 
 def _douban_candidates(
@@ -416,17 +503,54 @@ def _douban_candidates(
             continue
         seen_names.add(key)
         unique_names.append(name.strip())
+    request_headers = _douban_request_headers(diagnostics)
+    if unique_names and request_headers.get("Cookie"):
+        # The authenticated HTML page often finds older films and precise TV
+        # seasons with one request while subject_suggest returns HTTP 200 [].
+        # Search it first to avoid exhausting Douban's request allowance on
+        # several low-yield suggestion variants.
+        primary = unique_names[0]
+        if expected_season is not None:
+            primary += (f" 第{expected_season}季" if _contains_cjk(primary)
+                        else f" Season {expected_season}")
+        if year and year not in primary:
+            primary += f" {year}"
+        page_diagnostics: list[str] = []
+        try:
+            for candidate in _douban_search_page_candidates(primary, year, diagnostics=page_diagnostics):
+                add(candidate)
+        except urllib.error.HTTPError as exc:
+            note(f"HTML 搜索 HTTP {exc.code}")
+            if exc.code in {403, 429}:
+                return []
+        except (urllib.error.URLError, OSError, json.JSONDecodeError, ValueError) as exc:
+            note(f"HTML 搜索失败：{type(exc).__name__}")
+        for message in page_diagnostics:
+            note(message)
+        if any(re.search(r"搜索访问太频繁|访问频率过高|验证码|安全验证", message, re.I)
+               for message in page_diagnostics):
+            return []
+        if any(
+            candidate.score >= 75
+            and (not year or candidate.year == year)
+            and (expected_season is None or candidate.season_number == expected_season)
+            and _douban_title_matches(candidate, unique_names)
+            for candidate in found.values()
+        ):
+            return sorted(found.values(), key=lambda item: item.score, reverse=True)
     # Keep automatic lookups bounded; the first names are deliberately ordered
     # by _douban_for_release from the most specific to the broadest fallback.
-    for name in unique_names[:8]:
+    for name in unique_names[:3]:
         if not name:
             continue
         for query in _name_variants(name):
             url = "https://movie.douban.com/j/subject_suggest?q=" + urllib.parse.quote(query)
             try:
-                data = _get_json(url, headers=_DOUBAN_HEADERS)
+                data = _get_json(url, headers=request_headers)
             except urllib.error.HTTPError as exc:
                 note(f"HTTP {exc.code}")
+                if exc.code in {403, 429}:
+                    return sorted(found.values(), key=lambda item: item.score, reverse=True)
                 continue
             except urllib.error.URLError as exc:
                 reason = str(exc.reason or exc)
@@ -466,6 +590,7 @@ def _douban_candidates(
                         year=item_year,
                         score=score,
                         season_number=season,
+                        source="suggest",
                     )
                 )
             # A 100-point same-year result is already an exact match.  Do not
@@ -482,7 +607,7 @@ def _douban_candidates(
         # regular HTML search has all season-specific entries, so query it with
         # an explicit season suffix and merge its results with the suggest API.
         page_queries: list[str] = []
-        for name in unique_names[:8]:
+        for name in unique_names[:6]:
             if not name:
                 continue
             page_queries.append(f"{name} Season {expected_season}")
@@ -498,11 +623,64 @@ def _douban_candidates(
                     add(candidate)
             except urllib.error.HTTPError as exc:
                 note(f"HTML 搜索 HTTP {exc.code}")
+                if exc.code in {403, 429}:
+                    return sorted(found.values(), key=lambda item: item.score, reverse=True)
             except urllib.error.URLError as exc:
                 note(f"HTML 搜索网络错误：{exc.reason or exc}")
             except (OSError, json.JSONDecodeError, ValueError) as exc:
                 note(f"HTML 搜索失败：{exc}")
                 continue
+            if diagnostics and any(
+                re.search(r"搜索访问太频繁|访问频率过高|验证码|安全验证|(?<!非 )HTTP\s*(?:403|429)", item, re.I)
+                for item in diagnostics
+            ):
+                return sorted(found.values(), key=lambda item: item.score, reverse=True)
+    else:
+        # The suggest API frequently returns only the newest remake for a
+        # title shared by several films. If it didn't produce an exact-year,
+        # plausible match, use the regular result page with the year in the
+        # query; unlike suggest, this page commonly includes older editions.
+        exact_year_results = [
+            candidate
+            for candidate in found.values()
+            if candidate.score >= 60
+            and (not year or candidate.year == year)
+            and _douban_title_matches(candidate, unique_names)
+        ]
+        if not exact_year_results:
+            page_queries: list[str] = []
+            for name in unique_names[:3]:
+                if not name:
+                    continue
+                query = name if not year or year in name else f"{name} {year}"
+                if query.casefold() not in {value.casefold() for value in page_queries}:
+                    page_queries.append(query)
+            for query in page_queries[:3]:
+                try:
+                    for candidate in _douban_search_page_candidates(
+                        query, year, diagnostics=diagnostics
+                    ):
+                        add(candidate)
+                except urllib.error.HTTPError as exc:
+                    note(f"HTML 搜索 HTTP {exc.code}")
+                    if exc.code in {403, 429}:
+                        return sorted(found.values(), key=lambda item: item.score, reverse=True)
+                except urllib.error.URLError as exc:
+                    note(f"HTML 搜索网络错误：{exc.reason or exc}")
+                except (OSError, json.JSONDecodeError, ValueError) as exc:
+                    note(f"HTML 搜索失败：{exc}")
+                if diagnostics and any(
+                    re.search(r"搜索访问太频繁|访问频率过高|验证码|安全验证|(?<!非 )HTTP\s*(?:403|429)", item, re.I)
+                    for item in diagnostics
+                ):
+                    return sorted(found.values(), key=lambda item: item.score, reverse=True)
+                if any(
+                    (not year or candidate.year == year)
+                    and candidate.score >= 60
+                    and _douban_title_matches(candidate, unique_names)
+                    for candidate in found.values()
+                ):
+                    break
     return sorted(found.values(), key=lambda item: item.score, reverse=True)
 
 
@@ -510,6 +688,9 @@ def _choose_douban(
     candidates: list[DoubanMatch],
     expected_season: int | None = None,
     expected_titles: list[str] | None = None,
+    assistant: Any | None = None,
+    query: str = "",
+    expected_year: str | None = None,
 ) -> DoubanMatch | None:
     if expected_season is not None:
         season_matches = [item for item in candidates if item.season_number == expected_season]
@@ -533,6 +714,8 @@ def _choose_douban(
                 for item in candidates
                 if item.season_number is None
                 and item.score >= 75
+                and (not expected_year or (item.year.isdigit()
+                     and abs(int(item.year) - int(expected_year)) <= 1))
                 and (not expected_titles or _douban_title_matches(item, expected_titles))
             ]
             if not series_matches:
@@ -542,14 +725,62 @@ def _choose_douban(
         candidates = [item for item in candidates if _douban_title_matches(item, expected_titles)]
         if not candidates:
             return None
+    elif expected_year:
+        # Never silently attach a same-title remake from another year. Allow a
+        # one-year tolerance for regional release-date differences, preferring
+        # an exact-year result whenever one exists.
+        dated = [item for item in candidates if item.year.isdigit()]
+        exact = [item for item in dated if item.year == str(expected_year)]
+        near = [
+            item
+            for item in dated
+            if abs(int(item.year) - int(expected_year)) <= 1
+        ]
+        candidates = exact or near
+        if not candidates:
+            return None
+    if expected_titles:
+        identity_matches = [
+            item for item in candidates if _douban_title_matches(item, expected_titles)
+        ]
+        if not identity_matches:
+            return None
+        candidates = identity_matches
     if not candidates:
         return None
+    if assistant is not None and len(candidates) > 1:
+        try:
+            choice = assistant.choose_douban(
+                query or (expected_titles[0] if expected_titles else ""),
+                [asdict(item) for item in candidates[:10]],
+            )
+        except Exception as exc:  # Optional assistance must never block normal matching.
+            print(f"警告：GPT 豆瓣候选判断失败，将使用规则排序：{exc}")
+        else:
+            if choice is not None:
+                selected = candidates[choice - 1]
+                print(
+                    f"[GPT] 豆瓣候选选择：{selected.title or selected.original_title} "
+                    f"({selected.year or '未知年份'})"
+                    + (
+                        f"；置信度 {assistant.last_douban_choice_confidence:.0%}"
+                        if isinstance(
+                            getattr(assistant, "last_douban_choice_confidence", None),
+                            (float, int),
+                        )
+                        else ""
+                    )
+                )
+                return selected
+            if getattr(assistant, "last_douban_choice_confidence", None) is not None:
+                print("[GPT] 豆瓣候选置信度不足或模型拒绝选择，转为待确认，不自动套用候选")
+                return None
     top = candidates[0]
     if len(candidates) == 1:
         # A single season-filtered candidate is common for TV releases.  Keep
         # the same 75-point floor used by non-interactive runs, while avoiding
         # an unnecessary prompt for an otherwise reasonable exact match.
-        if top.score >= 75:
+        if top.score >= 75 or (expected_year and top.year == str(expected_year)):
             return top
         if not sys.stdin.isatty():
             return None
@@ -558,7 +789,7 @@ def _choose_douban(
         answer = input("直接回车使用此条目；输入 0 后手工提供：").strip()
         return top if answer in {"", "1"} else None
     ambiguous = len(candidates) > 1 and top.score - candidates[1].score < 8
-    if top.score >= 85 and not ambiguous:
+    if (top.score >= 85 or (expected_year and top.year == str(expected_year))) and not ambiguous:
         return top
     if not sys.stdin.isatty():
         return top if top.score >= 75 else None
@@ -640,11 +871,19 @@ def build_subtitle(
     return f"{result} [{language}]" if language else result
 
 
-def infer_mteam_category(*, kind: str, source: str, resolution: str, animation: bool) -> str:
+def infer_mteam_category(
+    *,
+    kind: str,
+    source: str,
+    resolution: str,
+    animation: bool,
+    dvd_iso: bool | None = None,
+) -> str:
     source_upper = source.upper()
     disc_bluray = source in {"BluRay", "UHD BluRay"}
     any_bluray = "BLURAY" in source_upper
-    dvd_iso = source in {"DVD", "DVD5", "DVD9"}
+    if dvd_iso is None:
+        dvd_iso = source in {"DVD5", "DVD9"}
     resolution_match = re.match(r"(\d+)[pi]$", resolution or "", re.I)
     # M-Team treats sub-720p releases such as 480p/576p/540p/544p as SD.
     # The Survivor S07 files are 544p and must therefore use the SD category.
@@ -1888,13 +2127,36 @@ def _manual_douban(url: str) -> DoubanMatch:
     match = re.search(r"/subject/(\d+)", url)
     item_id = match.group(1) if match else ""
     canonical = f"https://movie.douban.com/subject/{item_id}/" if item_id else url
-    return DoubanMatch(id=item_id, url=canonical, title="", original_title="", year="", score=100.0)
+    return DoubanMatch(
+        id=item_id,
+        url=canonical,
+        title="",
+        original_title="",
+        year="",
+        score=100.0,
+        source="manual",
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="生成 M-Team 发布资料包、V1 私有种子、MediaInfo/BDInfo Text 和 4 张截图")
     parser.add_argument("input", type=Path, help="单个视频/ISO，或剧集所在文件夹")
     parser.add_argument("--apply", action="store_true", help="资料准备成功后执行规范重命名")
+    parser.add_argument(
+        "--gpt",
+        action="store_true",
+        help="调用本地 CLIProxyAPI 辅助识别主标题和豆瓣候选；默认关闭",
+    )
+    parser.add_argument(
+        "--web-search",
+        action="store_true",
+        help="配合 --gpt 请求 CLIProxyAPI 的联网 web_search；默认关闭",
+    )
+    parser.add_argument(
+        "--remain",
+        action="store_true",
+        help="保持当前目录和文件名，不执行重命名或硬链接，只生成资料包/截图/种子",
+    )
     parser.add_argument("--yes", action="store_true", help="跳过重命名格式预览确认")
     parser.add_argument(
         "--hardlink",
@@ -1907,9 +2169,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--year", help="四位年份")
     parser.add_argument("--source", default="auto", help="来源，如 HDTV、WEB-DL、BluRay、BluRay REMUX")
     parser.add_argument("--group", help="发布组")
+    parser.add_argument("--default-group-nogrp", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--default-web-dl", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--edition", help="原盘版本，如 MOC")
     parser.add_argument("--platform", help="WEB-DL 平台")
     parser.add_argument("--kind", choices=("auto", "movie", "tv"), default="auto", help="电影或剧集")
+    parser.add_argument(
+        "--allow-inferred-episodes",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument("--exclude-sample-content", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--episode", help="单文件的季集，例如 S01E01；文件夹模式从每个文件名识别")
     parser.add_argument("--audio-count", action="store_true", help="在标题添加 2Audio、3Audio；默认不添加")
     parser.add_argument("--tmdb-id", type=int, help="手工指定 TMDB ID")
@@ -2420,12 +2690,29 @@ def _folder_videos(root: Path) -> list[Path]:
     )
 
 
+def _tmdb_search_with_aliases(client, args, kind, base_title, year):
+    identity = getattr(args, '_gpt_identity', None)
+    queries = [base_title]
+    if identity and identity.confidence >= .90:
+        queries.extend(getattr(identity, 'search_aliases', ())[:3])
+    found = {}
+    for query in dict.fromkeys(q for q in queries if q):
+        for item in client.search(kind, query, year):
+            if item.id not in found or item.score > found[item.id].score:
+                found[item.id] = item
+        # Stop on an unambiguous exact-year high-confidence match.
+        if any(item.year == str(year) and item.score >= 90 for item in found.values()):
+            break
+    return sorted(found.values(), key=lambda item: item.score, reverse=True)
+
+
 def _tmdb_for_release(
     args: argparse.Namespace,
     *,
     kind: str,
     base_title: str,
     year: str | None,
+    strict_year: bool = False,
 ) -> TmdbMatch | None:
     tmdb_client = TmdbClient(
         read_token=os.environ.get("TMDB_READ_ACCESS_TOKEN", ""),
@@ -2439,7 +2726,11 @@ def _tmdb_for_release(
     try:
         if args.tmdb_id:
             return tmdb_client.by_id(kind, args.tmdb_id)
-        return _choose_tmdb(tmdb_client.search(kind, base_title, year))
+        return _choose_tmdb(
+            _tmdb_search_with_aliases(tmdb_client, args, kind, base_title, year),
+            expected_year=year,
+            strict_year=(kind == "movie" or strict_year),
+        )
     except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as exc:
         print(f"警告：TMDB 查询失败，将使用文件名结果：{exc}")
         return None
@@ -2481,11 +2772,15 @@ def _douban_for_release(
     year: str | None,
     season_number: int | None = None,
 ) -> DoubanMatch | None:
+    assistant = getattr(args, "_gpt_assistant", None) if getattr(args, "gpt", False) else None
     douban = _manual_douban(args.douban_url) if args.douban_url else None
     if not douban and not args.offline:
         douban_diagnostics: list[str] = []
         season = _tmdb_season_for_release(args, tmdb, season_number)
-        search_year = (season.year if season and season.year else year)
+        # A series premiere year is not the year of a later season. When TMDB
+        # has no season air date, search the season without a year constraint.
+        search_year = (season.year if season and season.year
+                       else year if season_number in {None, 1} else None)
         search_names = [
             tmdb.original_name if tmdb else "",
             tmdb.name if tmdb else "",
@@ -2493,6 +2788,9 @@ def _douban_for_release(
             tmdb.chinese_name if tmdb else "",
             base_title,
         ]
+        identity = getattr(args, '_gpt_identity', None)
+        if identity and identity.confidence >= .90:
+            search_names.extend(getattr(identity, 'search_aliases', ())[:3])
         if season_number is not None:
             # Prefer the TMDB season's subtitle (e.g. ``Pearl Islands``),
             # while retaining generic ``Season N``/``第N季`` fallbacks.
@@ -2518,27 +2816,51 @@ def _douban_for_release(
                 seen_names.add(key)
                 deduplicated_names.append(name.strip())
         search_names = deduplicated_names
-        douban = _choose_douban(
-            _douban_candidates(
-                search_names,
-                search_year,
-                expected_season=season_number,
-                diagnostics=douban_diagnostics,
-            ),
+        expected_titles = [
+            name
+            for name in (
+                tmdb.original_name if tmdb else "",
+                tmdb.name if tmdb else "",
+                tmdb.chinese_name if tmdb else "",
+                title,
+                base_title,
+            )
+            if name
+        ]
+        candidates = _douban_candidates(
+            search_names,
+            search_year,
             expected_season=season_number,
-            expected_titles=[
-                name
-                for name in (
-                    tmdb.original_name if tmdb else "",
-                    tmdb.name if tmdb else "",
-                    tmdb.chinese_name if tmdb else "",
-                    title,
-                    base_title,
-                )
-                if name and season_number is not None
-            ],
+            diagnostics=douban_diagnostics,
         )
-        if not douban and season_number is not None:
+        cookie_used = False
+        cookie_path = os.environ.get("DOUBAN_COOKIE_FILE", "").strip()
+        if cookie_path:
+            try:
+                cookie_used = bool(load_douban_cookie_header(cookie_path))
+            except DoubanCookieError:
+                cookie_used = False
+        if cookie_used:
+            print("[豆瓣] 已使用配置的登录会话进行候选搜索（凭据不会写入资料包或日志）")
+        elif cookie_path:
+            print("[豆瓣] 配置了 Cookie 文件，但未能加载有效会话；本次搜索按未登录处理")
+        if assistant is not None:
+            assistant.last_douban_candidates = [asdict(item) for item in candidates[:30]]
+            assistant.last_douban_diagnostics = list(douban_diagnostics)
+            assistant.last_douban_cookie_used = cookie_used
+        douban = _choose_douban(
+            candidates,
+            expected_season=season_number,
+            expected_titles=expected_titles,
+            assistant=assistant,
+            query=" ".join(value for value in (title or base_title, search_year or "") if value),
+            expected_year=search_year if season_number is None else (tmdb.year if tmdb else year),
+        )
+        douban_blocked = any(
+            re.search(r"搜索访问太频繁|访问频率过高|验证码|安全验证|(?<!非 )HTTP\s*(?:403|429)", item, re.I)
+            for item in douban_diagnostics
+        )
+        if not douban and season_number is not None and not douban_blocked:
             # A limited series or anime may have only one series-level Douban
             # subject.  Retry with bare names (without ``Season N``) and keep
             # only an exact title/year match with no explicit season marker.
@@ -2557,7 +2879,7 @@ def _douban_for_release(
             ]
             bare_candidates = _douban_candidates(
                 bare_names,
-                search_year,
+                tmdb.year if tmdb else year,
                 diagnostics=douban_diagnostics,
             )
             expected_titles = [
@@ -2569,14 +2891,36 @@ def _douban_for_release(
                 item
                 for item in bare_candidates
                 if item.season_number is None
-                and item.year == search_year
+                and item.year == (tmdb.year if tmdb else year)
                 and _douban_title_matches(item, expected_titles)
             ]
             if series_candidates:
-                douban = _choose_douban(series_candidates)
+                if assistant is not None:
+                    assistant.last_douban_candidates = [
+                        asdict(item) for item in series_candidates[:30]
+                    ]
+                douban = _choose_douban(
+                    series_candidates,
+                    expected_titles=expected_titles,
+                    assistant=assistant,
+                    query=" ".join(value for value in (title or base_title, search_year or "") if value),
+                )
+        if assistant is not None:
+            assistant.last_douban_diagnostics = list(douban_diagnostics)
+            if douban:
+                assistant.last_douban_selection = {
+                    "id": douban.id,
+                    "url": douban.url,
+                    "title": douban.title,
+                    "original_title": douban.original_title,
+                    "year": douban.year,
+                    "score": douban.score,
+                    "source": douban.source,
+                    "model_confidence": assistant.last_douban_choice_confidence,
+                }
+        if not douban and douban_diagnostics:
+            print("豆瓣查询诊断：" + "；".join(douban_diagnostics[:6]))
         if season_number is not None and not douban:
-            if douban_diagnostics:
-                print("豆瓣查询诊断：" + "；".join(douban_diagnostics[:4]))
             print(
                 f"提示：未找到同时匹配当前剧名和第 {season_number} 季的豆瓣条目，"
                 "已跳过不相关结果以避免误填。"
@@ -2589,6 +2933,21 @@ def _douban_for_release(
         if manual:
             douban = _manual_douban(manual)
     return douban
+
+
+def _identification_evidence(args: argparse.Namespace) -> dict[str, Any]:
+    assistant = getattr(args, "_gpt_assistant", None)
+    identity = getattr(args, "_gpt_identity", None)
+    return {
+        "model": getattr(assistant, "model", "") if assistant else "",
+        "web_search_requested": bool(getattr(assistant, "web_search", False)),
+        "web_search_used": bool(getattr(assistant, "last_web_search_used", False)),
+        "identity": asdict(identity) if identity else None,
+        "douban_cookie_used": bool(getattr(assistant, "last_douban_cookie_used", False)),
+        "douban_candidates": list(getattr(assistant, "last_douban_candidates", []))[:30],
+        "douban_selection": getattr(assistant, "last_douban_selection", None),
+        "douban_diagnostics": list(getattr(assistant, "last_douban_diagnostics", []))[:12],
+    }
 
 
 def _folder_screenshots(
@@ -3019,7 +3378,7 @@ def _prepare_folder(
         raise ValueError("文件夹模式用于剧集，--kind 不能设为 movie")
     if args.episode:
         raise ValueError("文件夹模式会从每个文件名识别季集，请不要传 --episode")
-    if args.apply and rename_root:
+    if args.apply and rename_root and not args.remain:
         cached = _cached_folder_prepare_package(root)
         if cached is not None:
             return _apply_cached_folder_prepare(args, root, cached)
@@ -3029,6 +3388,13 @@ def _prepare_folder(
         args.tmdb_id = embedded_tmdb_id
         print(f"已从目录名识别 TMDB ID：{embedded_tmdb_id}")
     paths = selected_paths or _folder_videos(root)
+    if getattr(args, "exclude_sample_content", False):
+        non_auxiliary = [path for path in paths if not sample_or_extra(path.relative_to(root))]
+        if non_auxiliary:
+            excluded = [path.relative_to(root).as_posix() for path in paths if path not in non_auxiliary]
+            if excluded:
+                print(f"忽略样片/附加视频 {len(excluded)} 个；文件清单仍保留在审计记录中。")
+            paths = non_auxiliary
     if not paths:
         raise ValueError("目录中没有找到支持的视频文件")
 
@@ -3053,7 +3419,26 @@ def _prepare_folder(
         probes.append((path, hints))
         if not hints.episode:
             missing_episodes.append(path)
-    if missing_episodes:
+    season_only_mapping = (
+        season_folder_map(paths, root) if args.remain and missing_episodes else None
+    )
+    if season_only_mapping:
+        probes = [
+            (path, replace(hints, episode=season_only_mapping[path]))
+            for path, hints in probes
+        ]
+        missing_episodes = []
+        print(
+            f"[剧集映射] 保持模式：依据明确的季目录确认 {len(season_only_mapping)} 个文件所属季；"
+            "不推断、不校验内部集号"
+        )
+    allow_inference = bool(
+        getattr(args, "allow_inferred_episodes", False)
+        and args.remain
+        and args.gpt
+        and len(paths) > 1
+    )
+    if missing_episodes and not allow_inference:
         examples = "；".join(str(path.relative_to(root)) for path in missing_episodes[:8])
         extra = f"（另有 {len(missing_episodes) - 8} 个）" if len(missing_episodes) > 8 else ""
         raise ValueError(
@@ -3104,11 +3489,91 @@ def _prepare_folder(
     shared_args = argparse.Namespace(**vars(args))
     shared_args.kind = "tv"
     shared_args.episode = first_hints.episode
+    if rename_root:
+        shared_args._source_context = root.name
     if shared_args.group is None:
         shared_args.group = first_hints.group
     base_title, year, common_source, common_group, edition, _episode, common_platform = _resolve_fields(
         shared_args, first_path, first_media
     )
+    root_hints = filename_hints(Path(root.name + ".mkv"))
+    if not year and root_hints.year:
+        year = root_hints.year
+    # _resolve_fields stores the optional AI client on the shared namespace so
+    # the later TMDB/Douban calls use the same identification context.
+    args = shared_args
+    inferred_episode_mapping: dict[Path, str] = season_only_mapping or {}
+    episode_mapping_source = "season_folder_only" if season_only_mapping else "filename"
+    episode_mapping_warnings: list[str] = []
+    if missing_episodes:
+        identity = getattr(args, "_gpt_identity", None)
+        if (
+            not identity
+            or identity.kind != "tv"
+            or identity.confidence < 0.80
+        ):
+            raise ValueError(
+                "剧集文件名缺少明确季集号，且大模型未以至少 80% 置信度确认电视剧；"
+                "未推断集数"
+            )
+        season = (
+            season_number_hint(identity.episode)
+            or season_number_hint(root.name)
+            or season_number_hint(" ".join(path.relative_to(root).as_posix() for path in paths))
+        )
+        # Map independently by explicit season folders (e.g. Saison 1/Saison 2).
+        groups: dict[int | None, list[Path]] = {}
+        for path, hints in probes:
+            if hints.episode:
+                continue
+            relative_parent = path.parent.relative_to(root).as_posix()
+            selected_season = season_number_hint(relative_parent) or season
+            groups.setdefault(selected_season, []).append(path)
+        for selected_season, group_paths in groups.items():
+            mapped = sequential_episode_map(group_paths, season=selected_season)
+            if mapped is None:
+                season_only = season_folder_map(group_paths, root) if args.remain else None
+                if season_only:
+                    inferred_episode_mapping.update(season_only)
+                    episode_mapping_source = "season_folder_only"
+                    warning = (
+                        f"季目录={group_paths[0].parent.relative_to(root)}；"
+                        + episode_mapping_issues(group_paths)
+                        + "；仅确认季数，未推断具体集号"
+                    )
+                    episode_mapping_warnings.append(warning)
+                    print(f"[剧集映射] {warning}")
+                    continue
+                raise ValueError(
+                    "剧集文件名缺少季集号，且无法组成唯一、连续的集数序列；"
+                    f"季目录={group_paths[0].parent.relative_to(root)}；"
+                    + episode_mapping_issues(group_paths)
+                    + "；未推断集数：" + ", ".join(path.relative_to(root).as_posix() for path in group_paths[:4])
+                )
+            mapping, source = mapped
+            inferred_episode_mapping.update(mapping)
+            if episode_mapping_source != "season_folder_only":
+                episode_mapping_source = source
+        if set(inferred_episode_mapping) != set(missing_episodes):
+            raise ValueError("剧集集数推断未覆盖所有无集数文件，保持待确认")
+        probes = [
+            (path, replace(hints, episode=inferred_episode_mapping.get(path, hints.episode)))
+            for path, hints in probes
+        ]
+        probes.sort(key=lambda item: (*_episode_sort_key(item[1].episode or ""), str(item[0]).casefold()))
+        first_path, first_hints = probes[0]
+        shared_args.episode = first_hints.episode
+        args = shared_args
+        if episode_mapping_warnings:
+            print(
+                f"[剧集映射] 大模型确认电视剧（{identity.confidence:.0%}）；"
+                f"确认 {len(inferred_episode_mapping)} 个文件所属季，部分集号仍待核对"
+            )
+        else:
+            print(
+                f"[剧集映射] 大模型确认电视剧（{identity.confidence:.0%}）；"
+                f"按连续文件序列映射 {len(inferred_episode_mapping)} 集（{episode_mapping_source}）"
+            )
     # ``filename_hints`` cannot infer a regular ``Sxx`` episode token from
     # disc-style names such as ``Season2.Disc1``.  Once the disc-aware parser
     # has established the SxxDxx identity, remove those markers from the
@@ -3134,13 +3599,26 @@ def _prepare_folder(
             args = argparse.Namespace(**vars(args))
             args.tmdb_id = resume_tmdb_id
             print(f"已从现有制种检查点恢复 TMDB ID：{resume_tmdb_id}")
-    tmdb = _tmdb_for_release(args, kind="tv", base_title=base_title, year=year)
+    starting_seasons = {
+        season_number
+        for _path, hints in probes
+        if (season_number := _season_number_from_episode(hints.episode)) is not None
+    }
+    tmdb = _tmdb_for_release(
+        args,
+        kind="tv",
+        base_title=base_title,
+        year=year,
+        strict_year=(starting_seasons == {1}),
+    )
     title = args.title or (tmdb.name if tmdb and tmdb.name else base_title)
     year = args.year or (tmdb.year if tmdb and tmdb.year else year)
     tmdb_id = tmdb.id if tmdb else args.tmdb_id
     season = _season_label([hints.episode or "" for _path, hints in probes])
     series_folder_name = _series_folder_name(title, year, tmdb_id, season=season)
-    target_root = root.with_name(series_folder_name) if rename_root else root.parent / series_folder_name
+    target_root = root if args.remain else (
+        root.with_name(series_folder_name) if rename_root else root.parent / series_folder_name
+    )
     episode_seasons = {
         season_number
         for _path, hints in probes
@@ -3160,13 +3638,15 @@ def _prepare_folder(
         )
     )
     if flatten_single_season:
-        if rename_root:
+        if args.remain:
+            print("提示：保持模式下沿用当前单季根目录，不建立新的 Season 子目录。")
+        elif rename_root:
             print("提示：输入父目录已标明单季，视频将直接放入改名后的单季根目录，不再建立重复的 Season 子目录。")
         else:
             print("提示：自动匹配结果只有一个季，视频将直接放入新的单季根目录。")
     if not _same_path(root, target_root) and target_root.exists():
         raise FileExistsError(f"目标剧集目录已存在，未执行任何改名：{target_root}")
-    if not _same_path(root, target_root):
+    if not args.remain and not _same_path(root, target_root):
         print(f"剧集目录预览：{root.name} → {target_root.name}")
     if not tmdb_id:
         print("提示：未获得 TMDB ID，剧集目录名将省略 [tmdb=...]；可传 --tmdb-id 补全。")
@@ -3180,7 +3660,11 @@ def _prepare_folder(
     )
     for path, hints in probes:
         source = None if args.source == "auto" else _canonical_source(args.source)
-        source = _canonical_source(source or hints.source or common_source) or ""
+        if source is None and getattr(args, "default_web_dl", False):
+            source = _autonomous_source(path, root.name)
+        else:
+            source = source or hints.source or common_source
+        source = _canonical_source(source) or source or ""
         if not source:
             raise ValueError(f"无法识别来源：{path.name}；请传 --source")
         # A matched disc collection is one release.  Use the representative
@@ -3212,7 +3696,10 @@ def _prepare_folder(
             country=country,
             include_audio_count=args.audio_count,
         )
-        if rename_root and not args.hardlink:
+        if args.remain:
+            target = path
+            logical = path.relative_to(root)
+        elif rename_root and not args.hardlink:
             season_directory = root if flatten_single_season else root / _season_folder(episode)
             target = season_directory / (release_title + path.suffix.lower())
             logical = target.relative_to(root)
@@ -3253,8 +3740,11 @@ def _prepare_folder(
     if conflicts:
         raise FileExistsError("目标文件已存在，未执行任何改名：" + "；".join(str(path) for path in conflicts))
 
-    _print_folder_rename_preview(provisional, root=root, target_root=target_root)
-    if args.apply and not _confirm_rename_preview(
+    if args.remain:
+        print("\n保持模式：保留当前剧集目录和全部文件名，不执行重命名或硬链接。")
+    else:
+        _print_folder_rename_preview(provisional, root=root, target_root=target_root)
+    if not args.remain and args.apply and not _confirm_rename_preview(
         needs_rename=(
             (rename_root and not _same_path(root, target_root))
             or any(plan.source_path != plan.target_path for plan in provisional)
@@ -3290,7 +3780,9 @@ def _prepare_folder(
         year=year,
         season_number=douban_season_number,
     )
-    language_code = (tmdb.original_language if tmdb else "") or representative.media.audio_language
+    language_code = representative.media.audio_language
+    if not language_code or language_code.lower() == "und":
+        language_code = tmdb.original_language if tmdb else ""
     subtitle = build_subtitle(
         douban=douban,
         tmdb=tmdb,
@@ -3303,10 +3795,14 @@ def _prepare_folder(
         source=representative.source,
         resolution=representative.media.resolution,
         animation=animation,
+        dvd_iso=(
+            Path(representative.source_path).suffix.casefold() == ".iso"
+            and representative.source in {"DVD", "DVD5", "DVD9"}
+        ),
     )
 
     output_dir = (args.output or root.parent / f"{pack_title}.prepare").resolve()
-    if args.apply and (rename_root or args.hardlink):
+    if args.apply and (rename_root or args.hardlink) and not args.remain:
         try:
             output_dir.relative_to(root.resolve())
         except ValueError:
@@ -3378,10 +3874,23 @@ def _prepare_folder(
     # hashing the media a second time.
     torrent_root_name = target_root.name
     if not args.skip_torrent:
-        torrent_files = sorted(
-            ((plan.source_path, plan.logical_path) for plan in provisional),
-            key=lambda item: str(item[1]).casefold(),
-        )
+        if args.remain:
+            # A remain-mode qB transfer keeps the original directory byte-for-byte.
+            # Include sidecars as well as videos so the published torrent manifest
+            # matches the existing qB payload and can be recalled into that folder.
+            torrent_files = []
+            for item in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix().casefold()):
+                if item.is_symlink():
+                    raise ValueError(f"保持模式目录包含符号链接，拒绝制种：{item.relative_to(root)}")
+                if item.is_file():
+                    torrent_files.append((item, item.relative_to(root)))
+                elif not item.is_dir():
+                    raise ValueError(f"保持模式目录包含特殊文件，拒绝制种：{item.relative_to(root)}")
+        else:
+            torrent_files = sorted(
+                ((plan.source_path, plan.logical_path) for plan in provisional),
+                key=lambda item: str(item[1]).casefold(),
+            )
         piece_length = create_private_v1_folder_torrent(root, torrent_files, torrent_path, torrent_root_name)
 
     imdb_url = f"https://www.imdb.com/title/{tmdb.imdb_id}/" if tmdb and tmdb.imdb_id else ""
@@ -3405,6 +3914,16 @@ def _prepare_folder(
         "subtitle": subtitle,
         "tmdb": asdict(tmdb) if tmdb else None,
         "douban_url": douban.url if douban else "",
+        "douban_match": asdict(douban) if douban else None,
+        "identification_evidence": _identification_evidence(args),
+        "episode_mapping": {
+            "source": episode_mapping_source,
+            "warnings": episode_mapping_warnings,
+            "entries": {
+                path.relative_to(root).as_posix(): episode
+                for path, episode in inferred_episode_mapping.items()
+            },
+        },
         "imdb_url": imdb_url,
         "source_language": LANGUAGE_NAMES.get(language_code.lower(), language_code),
         "media": asdict(representative.media),
@@ -3433,15 +3952,17 @@ def _prepare_folder(
         },
     }
     package_path = output_dir / "mteam-prepare.json"
-    backup_path = _write_rename_backup(
-        output_dir / "rename-backup.txt",
-        root_before=(root if rename_root else (input_reference or root)),
-        root_after=target_root,
-        pairs=[
-            (plan.source_path, target_root / plan.logical_path)
-            for plan in provisional
-        ],
-    )
+    backup_path = None
+    if not args.remain:
+        backup_path = _write_rename_backup(
+            output_dir / "rename-backup.txt",
+            root_before=(root if rename_root else (input_reference or root)),
+            root_after=target_root,
+            pairs=[
+                (plan.source_path, target_root / plan.logical_path)
+                for plan in provisional
+            ],
+        )
     if args.apply and args.hardlink:
         link_pairs = [
             (plan.source_path, target_root / plan.logical_path)
@@ -3449,11 +3970,12 @@ def _prepare_folder(
         ]
         created_links = _apply_hardlink_files(link_pairs)
         print(f"已创建 {created_links} 个规范路径硬链接；源文件和源目录保持不变。")
-    payload["rename_backup_path"] = str(backup_path)
+    payload["rename_backup_path"] = str(backup_path) if backup_path else ""
     payload["hardlink_mode"] = bool(args.hardlink)
+    payload["remain_mode"] = bool(args.remain)
     package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    if args.apply and not args.hardlink:
+    if args.apply and not args.hardlink and not args.remain:
         if rename_root:
             _apply_folder_renames(provisional, root=root, target_root=target_root)
         else:
@@ -3463,6 +3985,8 @@ def _prepare_folder(
     print(f"  整季标题：{pack_title}")
     if args.apply and args.hardlink:
         rename_status = "已创建硬链接，源文件保持不变"
+    elif args.remain:
+        rename_status = "保持原目录和文件名"
     else:
         rename_status = "已全部改名" if args.apply else "尚未改名"
     print(f"  视频文件：{len(provisional)} 个，{rename_status}")
@@ -3485,23 +4009,70 @@ def _prepare_folder(
     if not args.skip_torrent:
         print(f"  V1 私有多文件种子：{torrent_path}")
     print(f"  发布资料包：{package_path}")
-    if not args.apply:
+    if not args.apply and not args.remain:
         if args.hardlink:
             print("  注意：尚未创建硬链接；确认后重新执行并添加 --apply。")
         else:
             print("  注意：源文件尚未改名；确认后重新执行并添加 --apply。")
     elif args.hardlink:
         print("  硬链接模式：原始文件和目录未移动、未改名；规范路径与原文件共享数据。")
-    print(f"  原始名称备份：{backup_path}")
+    print(f"  原始名称备份：{backup_path or '未生成（保持模式）'}")
     return package_path
 
 
-def main(argv: list[str] | None = None) -> Path | None:
+def _prepare_movie_folder(args: argparse.Namespace, root: Path, main_video: Path) -> Path | None:
+    """Probe the feature only, but retain the entire original torrent tree."""
+    if not args.remain:
+        raise ValueError("电影目录目前仅支持 --remain；不自动整理或重命名目录")
+    output = (args.output or root.with_name(root.name + ".prepare")).resolve()
+    if output == root or output.is_relative_to(root):
+        raise ValueError("资料输出目录不得位于电影源目录内")
+    files = []
+    for item in sorted(root.rglob("*")):
+        if item.is_symlink() or not (item.is_file() or item.is_dir()):
+            raise ValueError(f"拒绝符号链接或特殊文件：{item.relative_to(root)}")
+        if item.is_file():
+            files.append((item, item.relative_to(root)))
+    child = argparse.Namespace(**vars(args))
+    child.input, child.output, child.skip_torrent = main_video, output, True
+    child.kind = "movie"
+    child._source_context = root.name
+    print(f"电影目录：识别正片 {main_video.relative_to(root)}；制种保留全部 {len(files)} 个文件。")
+    package_path = main(_args=child)
+    if package_path is None:
+        return None
+    payload = json.loads(package_path.read_text(encoding="utf-8"))
+    payload.update(input_path=str(root), prepared_path=str(root), filename=root.name,
+                   torrent_root_name=root.name, representative_path=str(main_video))
+    payload["files"] = [{"source_path": str(item), "prepared_path": str(item),
+                         "relative_path": rel.as_posix(), "size_bytes": item.stat().st_size}
+                        for item, rel in files]
+    if not args.skip_torrent:
+        torrent = output / (root.name + ".torrent")
+        piece_length = create_private_v1_folder_torrent(root, files, torrent, root.name)
+        payload["torrent"].update(path=str(torrent), piece_length=piece_length)
+    package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return package_path
+
+
+def main(argv: list[str] | None = None, *, _args: argparse.Namespace | None = None) -> Path | None:
     parser = _parser()
-    args = parser.parse_args(argv)
+    args = _args if _args is not None else parser.parse_args(argv)
     try:
+        if args.remain and args.hardlink:
+            raise ValueError("--remain 不能与 --hardlink 同时使用")
         path = args.input.resolve()
         if path.is_dir():
+            videos = [item for item in _folder_videos(path)
+                      if not sample_or_extra(item.relative_to(path))]
+            root_episode = filename_hints(Path(path.name + ".mkv")).episode
+            movie_folder = (args.kind == "movie" or
+                            (args.kind == "auto" and not root_episode and len(videos) == 1
+                             and not filename_hints(videos[0]).episode))
+            if movie_folder:
+                if len(videos) != 1:
+                    raise ValueError("电影目录必须有且仅有一个非样片正片；多作品目录需单独确认")
+                return _prepare_movie_folder(args, path, videos[0])
             return _prepare_folder(args, path)
         if not path.is_file():
             raise FileNotFoundError(f"找不到媒体文件或文件夹：{path}")
@@ -3529,7 +4100,9 @@ def main(argv: list[str] | None = None) -> Path | None:
             initial_media, precomputed_bdinfo = _read_initial_iso_media(args, path)
         base_title, year, source, group, edition, episode, platform = _resolve_fields(args, path, initial_media)
         hints = filename_hints(path, initial_media)
-        kind = args.kind if args.kind != "auto" else ("tv" if episode else "movie")
+        kind = args.kind if args.kind != "auto" else (
+            "tv" if episode or getattr(args, "_gpt_kind", "") == "tv" else "movie"
+        )
 
         tmdb: TmdbMatch | None = None
         tmdb_client = TmdbClient(
@@ -3541,7 +4114,11 @@ def main(argv: list[str] | None = None) -> Path | None:
                 if args.tmdb_id:
                     tmdb = tmdb_client.by_id(kind, args.tmdb_id)
                 else:
-                    tmdb = _choose_tmdb(tmdb_client.search(kind, base_title, year))
+                    tmdb = _choose_tmdb(
+                        _tmdb_search_with_aliases(tmdb_client, args, kind, base_title, year),
+                        expected_year=year,
+                        strict_year=(kind == "movie"),
+                    )
             except (OSError, urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError) as exc:
                 print(f"警告：TMDB 查询失败，将使用文件名结果：{exc}")
         elif not args.offline:
@@ -3568,7 +4145,7 @@ def main(argv: list[str] | None = None) -> Path | None:
             country=hints.country,
             include_audio_count=args.audio_count,
         )
-        target = path.with_name(release_title + path.suffix.lower())
+        target = path if args.remain else path.with_name(release_title + path.suffix.lower())
         if (
             args.apply
             and target.exists()
@@ -3577,16 +4154,21 @@ def main(argv: list[str] | None = None) -> Path | None:
         ):
             raise FileExistsError(f"目标文件已存在：{target}")
 
-        print("\n重命名格式预览：")
-        marker = "=" if target == path else "→"
-        print(f"  {path.name} {marker} {target.name}")
-        if args.hardlink and target != path:
-            print("  硬链接模式：确认后创建规范名称的硬链接，原始文件保持不变。")
-        if args.apply and not _confirm_rename_preview(
-            needs_rename=target != path,
-            skip_confirmation=args.yes,
-        ):
-            return None
+        if args.remain:
+            print("\n保持模式：保留当前文件名，不执行重命名或硬链接。")
+            print(f"  当前文件：{path.name}")
+            print(f"  发布标题：{release_title}")
+        else:
+            print("\n重命名格式预览：")
+            marker = "=" if target == path else "→"
+            print(f"  {path.name} {marker} {target.name}")
+            if args.hardlink and target != path:
+                print("  硬链接模式：确认后创建规范名称的硬链接，原始文件保持不变。")
+            if args.apply and not _confirm_rename_preview(
+                needs_rename=target != path,
+                skip_confirmation=args.yes,
+            ):
+                return None
 
         douban = _douban_for_release(
             args,
@@ -3597,7 +4179,9 @@ def main(argv: list[str] | None = None) -> Path | None:
             season_number=_season_number_from_episode(episode),
         )
 
-        language_code = (tmdb.original_language if tmdb else "") or media.audio_language
+        language_code = media.audio_language
+        if not language_code or language_code.lower() == "und":
+            language_code = tmdb.original_language if tmdb else ""
         subtitle = build_subtitle(
             douban=douban,
             tmdb=tmdb,
@@ -3610,6 +4194,7 @@ def main(argv: list[str] | None = None) -> Path | None:
             source=source,
             resolution=media.resolution,
             animation=animation,
+            dvd_iso=(path.suffix.casefold() == ".iso" and source in {"DVD", "DVD5", "DVD9"}),
         )
 
         output_dir = (args.output or target.with_suffix(".prepare")).resolve()
@@ -3632,6 +4217,15 @@ def main(argv: list[str] | None = None) -> Path | None:
                 tv_disc_set=(kind == "tv"),
             )
 
+        if args.remain and technical_info_type == "BDInfo":
+            # MediaInfo can recognize the ISO video while missing its audio.
+            # The complete playlist report is the authoritative disc probe.
+            media = _media_from_bdinfo(media_text, source)
+            release_title = build_title(title=title, year=year, source=source,
+                media=media, group=group, edition=edition, episode=episode,
+                platform=platform, country=hints.country,
+                include_audio_count=args.audio_count)
+
         screenshot_paths: list[Path] = []
         if not args.skip_screenshots:
             if args.screenshots != 4:
@@ -3648,14 +4242,16 @@ def main(argv: list[str] | None = None) -> Path | None:
         if not args.skip_torrent:
             piece_length = create_private_v1_torrent(path, torrent_path, target.name)
 
-        backup_path = _write_rename_backup(
-            output_dir / "rename-backup.txt",
-            root_before=path,
-            root_after=target,
-            pairs=[(path, target)],
-        )
+        backup_path = None
+        if not args.remain:
+            backup_path = _write_rename_backup(
+                output_dir / "rename-backup.txt",
+                root_before=path,
+                root_after=target,
+                pairs=[(path, target)],
+            )
         prepared_path = path
-        if args.apply and target != path:
+        if args.apply and not args.remain and target != path:
             if args.hardlink:
                 _apply_hardlink_files([(path, target)])
                 prepared_path = target
@@ -3672,6 +4268,7 @@ def main(argv: list[str] | None = None) -> Path | None:
             "release_name": release_title,
             "filename": target.name,
             "hardlink_mode": bool(args.hardlink),
+            "remain_mode": bool(args.remain),
             "kind": kind,
             "episode": episode or "",
             "year": year or "",
@@ -3682,6 +4279,8 @@ def main(argv: list[str] | None = None) -> Path | None:
             "subtitle": subtitle,
             "tmdb": asdict(tmdb) if tmdb else None,
             "douban_url": douban.url if douban else "",
+            "douban_match": asdict(douban) if douban else None,
+            "identification_evidence": _identification_evidence(args),
             "imdb_url": imdb_url,
             "source_language": LANGUAGE_NAMES.get(language_code.lower(), language_code),
             "media": asdict(media),
@@ -3702,7 +4301,7 @@ def main(argv: list[str] | None = None) -> Path | None:
                 "comment": "",
                 "source": "",
             },
-            "rename_backup_path": str(backup_path),
+            "rename_backup_path": str(backup_path) if backup_path else "",
         }
         package_path = output_dir / "mteam-prepare.json"
         package_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -3717,7 +4316,9 @@ def main(argv: list[str] | None = None) -> Path | None:
         if not args.skip_torrent:
             print(f"  V1 私有种子：{torrent_path}")
         print(f"  发布资料包：{package_path}")
-        print(f"  原始名称备份：{backup_path}")
+        print(f"  原始名称备份：{backup_path or '未生成（保持模式）'}")
+        if args.remain:
+            print("  保持模式：源文件未移动、未改名；资料包中的种子沿用当前文件名。")
         if not args.apply and target != path:
             if args.hardlink:
                 print(f"  注意：尚未创建硬链接；确认后可重新执行并添加 --apply，目标名为 {target.name}")

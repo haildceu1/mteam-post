@@ -14,6 +14,22 @@ from media_title_renamer.prepare import _bencode
 class PublishTests(unittest.TestCase):
     @patch("media_title_renamer.publish.mteam_fill_main")
     @patch("media_title_renamer.publish.prepare_main")
+    def test_gpt_and_remain_are_forwarded_to_fresh_prepare(
+        self, prepare_main, mteam_fill_main
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "Original.Release.mkv"
+            source.write_bytes(b"video")
+            package = Path(directory) / "Original Release.prepare" / "mteam-prepare.json"
+            prepare_main.return_value = package
+
+            publish.main([str(source), "--gpt", "--remain", "--no-upload"])
+
+        prepare_main.assert_called_once_with([str(source), "--gpt", "--remain"])
+        self.assertEqual(mteam_fill_main.call_args.args[0][0], str(package))
+
+    @patch("media_title_renamer.publish.mteam_fill_main")
+    @patch("media_title_renamer.publish.prepare_main")
     def test_existing_json_skips_prepare(self, prepare_main, mteam_fill_main) -> None:
         with tempfile.TemporaryDirectory() as directory:
             package = Path(directory) / "mteam-prepare.json"

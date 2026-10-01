@@ -6,7 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -139,23 +139,19 @@ def _number(value: str) -> float:
 
 
 def _resolution(width: int, height: int, scan_type: str = "", scan_order: str = "") -> str:
-    # Letterboxed films often have a height below their nominal raster; width is
-    # therefore the more useful tie-breaker for common HD/UHD releases.
-    interlaced = "interlac" in scan_type.lower() or scan_order.upper() in {"TFF", "BFF"}
-    suffix = "i" if interlaced else "p"
-    if width >= 7000 or height >= 4000:
-        return f"4320{suffix}"
+    # Letterboxed/cropped sources can report non-standard heights (e.g. 464p
+    # for an SD Xvid). M-Team exposes only these resolution buckets; infer the
+    # nearest supported label from measured raster dimensions.
+    del scan_type, scan_order  # M-Team title resolution is expressed as p.
     if width >= 3500 or height >= 2000:
-        return f"2160{suffix}"
-    if width >= 2500 or height >= 1350:
-        return f"1440{suffix}"
-    if width >= 1800 or height >= 1000:
-        return f"1080{suffix}"
-    if width >= 1100 or height >= 650:
-        return f"720{suffix}"
-    if height:
-        return f"{height}{suffix}"
-    return "未知分辨率"
+        return "2160p"
+    if width >= 1800 or height >= 900:
+        return "1080p"
+    if width >= 1100 or height >= 630:
+        return "720p"
+    if height <= 0:
+        return "未知分辨率"
+    return f"{min((360, 480, 540), key=lambda bucket: abs(bucket - height))}p"
 
 
 def _has_any(text: str, *patterns: str) -> bool:
@@ -384,6 +380,7 @@ def _canonical_source(value: str | None) -> str | None:
     if not value:
         return None
     compact = _clean_spaces(value.replace("_", " ").replace(".", " ")).lower()
+    compact = compact.replace("blu-ray", "blu ray")
     return SOURCE_ALIASES.get(compact, _clean_component(value))
 
 
@@ -451,6 +448,8 @@ def _infer_source(
 
     if re.search(r"\bWEB[ -]?DL\b", tokens):
         return "WEB-DL"
+    if re.search(r"\bWEB[ -]?RIP\b", tokens):
+        return "WEBRip"
     if re.search(r"\bHDTV\b", tokens):
         return "HDTV"
     if re.search(r"\bDVD(?:ISO|RIP)?\b", tokens):
@@ -477,6 +476,46 @@ def _infer_source(
     if extension.lower() == ".iso" and file_size and file_size > 9_000_000_000:
         return "UHD BluRay" if is_uhd else "BluRay"
     return None
+
+
+def _autonomous_source(path: Path, release_name: str = "") -> str | None:
+    """Apply the batch publisher's conservative, format-based source policy.
+
+    BluRay words in an ordinary video filename describe provenance, not an
+    authored disc. Only an explicit REMUX or an actual disc gets that source.
+    """
+    label = f"{path.stem} {release_name}"
+    upper = label.upper().replace("_", " ").replace(".", " ")
+    is_uhd = bool(re.search(r"\bUHD\b|\b2160P\b|\b4K\b", upper))
+    if path.suffix.casefold() == ".iso":
+        if re.search(r"\bDVD(?:ISO|RIP)?\b", upper):
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = None
+            return _dvd_disc_label(size) if size else "DVD"
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None
+        if re.search(r"\bBLU[ -]?RAY\b|\bBDMV\b", upper) or (size and size > 9_000_000_000):
+            return "UHD BluRay" if is_uhd else "BluRay"
+        # An unknown ISO must not be mislabeled as a streamed WEB-DL.
+        return None
+    for parent in path.parents:
+        if parent.name.casefold() == "bdmv" and (
+            (parent / "index.bdmv").is_file() or (parent / "STREAM").is_dir()
+        ):
+            return "UHD BluRay" if is_uhd else "BluRay"
+    if re.search(r"\bREMUX\b", upper):
+        return "UHD BluRay REMUX" if is_uhd else "BluRay REMUX"
+    return "WEB-DL"
+
+
+def _parenthesized_release_group(value: str) -> str | None:
+    """Scene-style '(codec - Group)[tag]' names keep the group inside ()."""
+    match = re.search(r'\s-\s*([A-Za-z][A-Za-z0-9_-]{1,29})\s*\)(?:\[[^]]+\])?$', value)
+    return match.group(1) if match else None
 
 
 def _strip_group(stem: str) -> tuple[str, str | None]:
@@ -595,7 +634,8 @@ def _filename_resolution(stem: str) -> tuple[int, int, str]:
         return 0, 0, "未知分辨率"
     height = int(match.group(1))
     widths = {4320: 7680, 2160: 3840, 1440: 2560, 1080: 1920, 720: 1280, 576: 720, 480: 720}
-    return widths[height], height, f"{height}{match.group(2).lower()}"
+    width = widths[height]
+    return width, height, _resolution(width, height)
 
 
 def _filename_video_format(stem: str) -> tuple[str, str]:
@@ -683,6 +723,10 @@ def inspect_media_from_filename(path: Path, source: str | None = None) -> MediaI
 
 
 def _source_with_platform(source: str, platform: str | None) -> str:
+    # BDRip is an internal encode/source distinction, not the movie's
+    # public medium spelling. Keep it for codec selection, display BluRay.
+    if source.endswith(" BDRip"):
+        source = source[:-6]
     if platform and source == "WEB-DL":
         return f"{platform} WEB-DL"
     return source
@@ -721,7 +765,7 @@ def build_title(
         parts.append(str(year))
     clean_edition = _clean_title(edition or "")
     if clean_edition:
-        if canonical_source not in {"BluRay", "UHD BluRay"}:
+        if canonical_source not in {"BluRay", "UHD BluRay"} and clean_edition.upper() not in {"REPACK", "PROPER", "RERIP"}:
             raise ValueError("地区/版本标注仅用于 BluRay/UHD BluRay 原盘")
         parts.append(clean_edition)
     if episode:
@@ -744,9 +788,11 @@ def build_title(
     parts.extend(media.hdr)
     parts.append(codec)
     if media.audio_codec:
-        # M-Team title style joins the channel layout directly to the audio
-        # codec: DD5.1, DDP5.1, DTS-HD MA5.1, LPCM2.0.
-        audio = media.audio_codec + (media.audio_channels or "")
+        # Preserve the site's common compact notation, except MP3 where the
+        # codec and channel layout are separate title tokens (MP3 2.0).
+        audio = media.audio_codec
+        if media.audio_channels:
+            audio += (" " if media.audio_codec == "MP3" else "") + media.audio_channels
         parts.append(audio)
         if include_audio_count and media.audio_tracks > 1:
             parts.append(f"{media.audio_tracks}Audio")
@@ -853,15 +899,99 @@ def _resolve_fields(
     media: MediaInfo,
 ) -> tuple[str, str | None, str, str | None, str | None, str | None, str | None]:
     hints = filename_hints(path, media)
-    title = args.title or hints.title
-    year = str(args.year) if args.year else hints.year
-    edition = args.edition if args.edition is not None else hints.edition
+    gpt_identity = None
+    if getattr(args, "gpt", False):
+        from .ai import CliproxyAssistant, CliproxyError
+
+        assistant = CliproxyAssistant(web_search=bool(getattr(args, "web_search", False)))
+        setattr(args, "_gpt_assistant", assistant)
+        try:
+            context_name = str(getattr(args, "_source_context", ""))
+            gpt_identity = assistant.identify(
+                filename=context_name or path.name,
+                parent_name=path.parent.name if not context_name else path.parent.parent.name,
+                hints=asdict(hints),
+                media=asdict(media),
+            )
+            setattr(args, "_gpt_identity", gpt_identity)
+            print(
+                f"[GPT] 主标题：{gpt_identity.search_title}"
+                f"；置信度：{gpt_identity.confidence:.0%}"
+            )
+            if assistant.web_search:
+                if assistant.last_web_search_used:
+                    print("[GPT Web] 已调用 CLIProxyAPI web_search 完成联网核验")
+                else:
+                    print("[GPT Web] 本次响应未返回 web_search 调用标记；已采用模型结果")
+        except CliproxyError as exc:
+            print(f"警告：GPT 辅助识别失败，将回退规则识别：{exc}")
+    context_name = str(getattr(args, "_source_context", ""))
+    context_hints = filename_hints(Path(context_name + ".mkv")) if context_name else None
+    title = args.title or ((gpt_identity.search_title or gpt_identity.title) if gpt_identity else "") or (context_hints.title if context_hints else "") or hints.title
+    year = str(args.year) if args.year else (hints.year or (context_hints.year if context_hints else "") or (gpt_identity.year if gpt_identity else ""))
+    edition = (
+        args.edition
+        if args.edition is not None
+        else (hints.edition or (gpt_identity.edition if gpt_identity else ""))
+    )
     source = None if args.source == "auto" else _canonical_source(args.source)
-    source = source or hints.source
-    group = args.group if args.group is not None else hints.group
-    episode = args.episode or hints.episode
-    platform = args.platform if args.platform is not None else hints.platform
-    kind = args.kind if args.kind != "auto" else ("tv" if episode else "movie")
+    parent_source = None
+    if path.parent.name:
+        # Scene filenames can omit the source while their torrent root carries
+        # it.  Do not infer a source from codec or resolution alone.
+        parent_source = _infer_source(path.parent.name, path.suffix, media)
+    context_source = _infer_source(str(getattr(args, "_source_context", "")), path.suffix, media)
+    if source is None and getattr(args, "default_web_dl", False):
+        source = _autonomous_source(path, context_name or path.parent.name)
+    else:
+        source = source or hints.source or parent_source or context_source or (gpt_identity.source if gpt_identity else "")
+    source = _canonical_source(source) or source or ""
+    if not source and re.search(r"\bBD\b", path.name + ' ' + path.parent.name, re.I):
+        source = "BluRay"
+    if source.casefold() == "bd":
+        source = "BluRay"
+    if source in {"BluRay", "UHD BluRay"} and path.suffix.casefold() in {".mkv", ".mp4", ".avi"}:
+        # A regular encoded video is not a disc image. REMUX sources have
+        # their own explicit source value and are deliberately unaffected.
+        source += " BDRip"
+    if (
+        getattr(args, "default_web_dl", False)
+        and args.edition is None
+        and source not in {"BluRay", "UHD BluRay"}
+        and str(edition or "").upper() not in {"REPACK", "PROPER", "RERIP"}
+    ):
+        # An AI's "complete/integral" or regional label is not a valid
+        # WEB-DL/REMUX edition field. Do not turn a safe default into a hard
+        # title-format failure.
+        edition = None
+    context_group = (
+        _parenthesized_release_group(path.name)
+        or _parenthesized_release_group(path.parent.name)
+        or _parenthesized_release_group(context_name)
+        or filename_hints(Path((context_name or path.parent.name) + ".mkv")).group
+    )
+    group = args.group if args.group is not None else (hints.group or context_group or (gpt_identity.group if gpt_identity else ""))
+    if not group and getattr(args, "default_group_nogrp", False):
+        group = "NOGRP"
+    if args.group == "NOGRP" and getattr(args, "gpt", False):
+        # Batch mode's fallback must not hide an actual bracketed group.
+        # Use filename evidence, never an invented group from the model.
+        from .prepare import _bracket_release_group
+        group = _bracket_release_group(path) or _bracket_release_group(path.parent) or group
+        args.group = group
+    episode = args.episode or hints.episode or (gpt_identity.episode if gpt_identity else "")
+    platform = (
+        args.platform
+        if args.platform is not None
+        else (hints.platform or (gpt_identity.platform if gpt_identity else ""))
+    )
+    kind = args.kind if args.kind != "auto" else (
+        "tv"
+        if episode or (gpt_identity and gpt_identity.kind == "tv")
+        else "movie"
+    )
+    if gpt_identity and gpt_identity.kind:
+        setattr(args, "_gpt_kind", gpt_identity.kind)
 
     if _is_interactive():
         # A fully tagged release should stay a one-command workflow. Ask only
@@ -872,7 +1002,7 @@ def _resolve_fields(
             year = _prompt("年份", None, required=True)
         if not source:
             source = _prompt_source(None)
-        if kind == "tv" and not episode:
+        if kind == "tv" and not episode and not getattr(args, "allow_inferred_episodes", False):
             episode = _prompt("季/集（如 S01E01 或 S01）", None, required=True)
     else:
         missing = []
@@ -882,7 +1012,7 @@ def _resolve_fields(
             missing.append("--source")
         if kind == "movie" and not year:
             missing.append("--year")
-        if kind == "tv" and not episode:
+        if kind == "tv" and not episode and not getattr(args, "allow_inferred_episodes", False):
             missing.append("--episode")
         if missing:
             raise ValueError("无法从文件名补全 " + "、".join(missing) + "；请传入这些参数，或在终端交互运行。")
@@ -945,6 +1075,18 @@ def _describe_media(media: MediaInfo) -> str:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "auto":
+        from .autonomous import main as autonomous_main
+        raise SystemExit(autonomous_main(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "recall-official":
+        from .recall_official import main as recall_official_main
+
+        recall_official_main(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "seed-official":
+        from .seed_official import main as seed_official_main
+
+        raise SystemExit(seed_official_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1].lower() == "prepare":
         from .prepare import main as prepare_main
 
@@ -975,11 +1117,22 @@ def main() -> None:
         description="读取 MediaInfo，生成符合 M-Team 影片标题规则的名称；默认只预览，不改文件。",
         epilog=(
             "子命令：prepare（准备资料）、publish（准备并填发布页）、"
+            "seed-official（经 qB WebUI API 添加已发布官方种子）、"
             "subtitle-generate（生成字幕测试文件）、subtitle-upload（批量填写/上传字幕）。"
         ),
     )
     parser.add_argument("input", type=Path, help="视频文件，或视频所在目录")
     parser.add_argument("--apply", action="store_true", help="确认执行重命名；未指定时仅预览")
+    parser.add_argument(
+        "--gpt",
+        action="store_true",
+        help="调用本地 CLIProxyAPI 辅助识别主标题；默认关闭",
+    )
+    parser.add_argument(
+        "--web-search",
+        action="store_true",
+        help="配合 --gpt 请求 CLIProxyAPI 的联网 web_search；默认关闭",
+    )
     parser.add_argument("--recursive", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--title", help="英文片名；省略时从原文件名识别或交互填写")
     parser.add_argument("--year", help="四位年份；省略时从原文件名识别")
@@ -993,6 +1146,8 @@ def main() -> None:
     parser.add_argument("--no-audio-count", action="store_false", dest="audio_count", help=argparse.SUPPRESS)
     parser.set_defaults(audio_count=False)
     args = parser.parse_args()
+    if args.web_search and not args.gpt:
+        parser.error("--web-search 需要同时传入 --gpt")
 
     try:
         paths = _video_paths(args.input, args.recursive)

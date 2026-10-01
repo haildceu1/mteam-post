@@ -1,11 +1,16 @@
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 from media_title_renamer.cli import (
     VIDEO_EXTENSIONS,
     _dvd_disc_label,
     _infer_source,
+    _parenthesized_release_group,
+    _resolve_fields,
+    _autonomous_source,
+    _resolution,
     _strip_release_prefix,
     _strip_group,
     _video_paths,
@@ -45,12 +50,79 @@ def media_json(*, writing_library="", audio_format="DTS", audio_profile="MA / Co
 
 
 class MediaTitleRenamerTests(unittest.TestCase):
+    def test_auto_publish_source_policy_prefers_remux_or_real_disc(self):
+        cases = (
+            ('Movie.2024.BluRay.x265.mkv', '', 'WEB-DL'),
+            ('Movie.2024.HDTV.mkv', '', 'WEB-DL'),
+            ('Movie.2024.WEBRip.mkv', '', 'WEB-DL'),
+            ('Movie.2024.mkv', 'Show.S01.WEBRip', 'WEB-DL'),
+            ('Movie.2024.mkv', 'Movie.2024.BluRay.REMUX', 'BluRay REMUX'),
+            ('Movie.2024.mkv', 'Movie.2024.UHD.BluRay.REMUX', 'UHD BluRay REMUX'),
+        )
+        for name, context, expected in cases:
+            with self.subTest(name=name, context=context):
+                self.assertEqual(_autonomous_source(Path('/media') / name, context), expected)
+        self.assertEqual(_autonomous_source(Path('/media/Movie.2024.BluRay.iso'), ''), 'BluRay')
+        with tempfile.TemporaryDirectory() as directory:
+            bdmv = Path(directory) / 'Movie.UHD.BluRay' / 'BDMV'
+            stream = bdmv / 'STREAM'
+            stream.mkdir(parents=True)
+            (bdmv / 'index.bdmv').write_bytes(b'')
+            self.assertEqual(_autonomous_source(stream / '00001.m2ts', 'Movie.UHD.BluRay'), 'UHD BluRay')
+
+    def test_abbreviated_movie_filename_uses_release_folder_title_year_and_source(self):
+        args = Namespace(
+            title=None, year=None, source="auto", group=None, edition=None,
+            episode=None, platform=None, kind="movie", gpt=False,
+            default_group_nogrp=True,
+            _source_context="Universal.Soldier.II.Brothers.In.Arms.1998.1080P.BLURAY.H264-UNDERTAKERS",
+        )
+        path = Path("/downloads/TL/Universal.Soldier.II.Brothers.In.Arms.1998.1080P.BLURAY.H264-UNDERTAKERS/undertakers-universalsoldieriibia1998-1080.mkv")
+        media = inspect_media(media_json(writing_library="x264"), source="BluRay BDRip")
+        title, year, source, group, *_ = _resolve_fields(args, path, media)
+        self.assertEqual(title, "Universal Soldier II Brothers In Arms")
+        self.assertEqual(year, "1998")
+        self.assertEqual(source, "BluRay BDRip")
+        self.assertEqual(group, "UNDERTAKERS")
+
+    def test_source_can_be_read_from_release_root_or_webrip_marker(self):
+        self.assertEqual(_infer_source('American Dad S22 DSNP Webrip x265', '.mkv'), 'WEBRip')
+        self.assertIsNone(_infer_source('Bookish S01 HEVC x265', '.mkv'))
+        self.assertEqual(_parenthesized_release_group('American Dad (1080p WEBRip x265 - Goki)[TAoE]'), 'Goki')
+    def test_repack_is_valid_for_encoded_bluray_but_regional_cut_is_not(self):
+        media=inspect_media(media_json(writing_library="x265"),source="BluRay BDRip")
+        title=build_title(title="Apocalypto",year="2006",source="BluRay BDRip",media=media,edition="REPACK")
+        self.assertIn("REPACK",title)
+        with self.assertRaises(ValueError):
+            build_title(title="Apocalypto",year="2006",source="BluRay BDRip",media=media,edition="US Cut")
+
+    def test_resolution_is_normalized_to_supported_mteam_buckets(self):
+        self.assertEqual(_resolution(640, 464), "480p")
+        self.assertEqual(_resolution(720, 576), "540p")
+        self.assertEqual(_resolution(1920, 1080, "Interlaced", "TFF"), "1080p")
+        self.assertEqual(_resolution(3840, 2160), "2160p")
+
+    def test_mp3_title_separates_codec_and_channel_layout(self):
+        data = media_json(audio_format="MPEG Audio", audio_profile="Layer 3")
+        data["media"]["track"][2]["Channel(s)"] = "2"
+        media = inspect_media(data, source="WEB-DL")
+        title = build_title(
+            title="Brides of Christ",
+            year="1991",
+            source="WEB-DL",
+            media=media,
+            group="NOGRP",
+        )
+        self.assertEqual(media.audio_codec, "MP3")
+        self.assertIn("MP3 2.0", title)
+
     def test_disc_release_group_with_escaped_at_sign_is_kept_consistently(self):
         stem, group = _strip_group(
             "JoJo.Season2.Disc1.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook#300\\@CHDBits"
         )
         self.assertTrue(stem.endswith("DTS-HD.MA.2.1"))
         self.assertEqual(group, "blucook#300@CHDBits")
+
 
     def test_large_untagged_iso_is_inferred_as_bluray(self):
         self.assertEqual(
@@ -95,7 +167,7 @@ class MediaTitleRenamerTests(unittest.TestCase):
         self.assertEqual(media.audio_codec, "DDP")
         self.assertEqual(
             build_title(title="Example Film", year="2025", source="UHD BluRay BDRip", media=media, group="TEST"),
-            "Example Film 2025 UHD BluRay BDRip 2160p HDR10 DoVi x265 DDP5.1-TEST",
+            "Example Film 2025 UHD BluRay 2160p HDR10 DoVi x265 DDP5.1-TEST",
         )
 
     def test_filename_hints_detects_tv_webdl_group_and_platform(self):
@@ -142,7 +214,7 @@ class MediaTitleRenamerTests(unittest.TestCase):
         data["media"]["track"][1].update({"ScanType": "Interlaced", "ScanOrder": "TFF", "FrameRate": "25.000"})
         media = inspect_media(data, source="HDTV")
         hints = filename_hints(Path("20.22.s01.E01.(2024).HDTV (1080i).by.Romanok8691.ts"), media)
-        self.assertEqual(media.resolution, "1080i")
+        self.assertEqual(media.resolution, "1080p")
         self.assertEqual(hints.title, "20 22")
         self.assertEqual(hints.episode, "S01E01")
         self.assertEqual(hints.group, "Romanok8691")
@@ -155,7 +227,7 @@ class MediaTitleRenamerTests(unittest.TestCase):
                 media=media,
                 group=hints.group,
             ),
-            "20 22 2024 S01E01 1080i HDTV H.264 DD5.1-Romanok8691",
+            "20 22 2024 S01E01 1080p HDTV H.264 DD5.1-Romanok8691",
         )
 
     def test_highest_bitrate_audio_is_used_and_count_is_opt_in(self):
