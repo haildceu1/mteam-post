@@ -10,6 +10,8 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from media_title_renamer.cli import MediaInfo
 from media_title_renamer.ai import AIIdentity
 
@@ -17,6 +19,7 @@ from media_title_renamer.prepare import (
     _get_json,
     _bdinfo_list_command,
     _bdinfo_scan_command,
+    _bdmv_main_feature_video,
     _bracket_release_group,
     _disc_episode,
     _clean_disc_marker_from_edition,
@@ -27,8 +30,8 @@ from media_title_renamer.prepare import (
     _douban_candidates,
     _douban_for_release,
     _embedded_tmdb_id,
-    _media_from_bdinfo,
     _matching_tv_disc_isos,
+    _media_from_bdinfo,
     _mount_iso,
     _resume_paths,
     _resume_tmdb_id_for_folder,
@@ -60,6 +63,25 @@ from media_title_renamer.prepare import (
     select_longest_bdinfo_playlist,
     select_tv_episode_bdinfo_playlist,
 )
+
+
+def test_bdmv_uses_only_a_clear_dominant_main_stream(tmp_path):
+    stream = tmp_path / "Disc" / "BDMV" / "STREAM"
+    stream.mkdir(parents=True)
+    main = stream / "00001.m2ts"
+    extra = stream / "00002.m2ts"
+    main.write_bytes(b"x")
+    extra.write_bytes(b"y")
+    with main.open("r+b") as handle:
+        handle.truncate(10 * 1024**3)
+    with extra.open("r+b") as handle:
+        handle.truncate(2 * 1024**3)
+    assert _bdmv_main_feature_video(tmp_path / "Disc", [main, extra]) == main
+
+    with extra.open("r+b") as handle:
+        handle.truncate(3 * 1024**3)
+    with pytest.raises(ValueError, match="体积接近"):
+        _bdmv_main_feature_video(tmp_path / "Disc", [main, extra])
 
 
 class PrepareTests(unittest.TestCase):
@@ -236,10 +258,10 @@ class PrepareTests(unittest.TestCase):
             None,
         )
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory) / "Original Show S01"
+            root = Path(directory) / "Original.Show.S01.720p.WEB-DL.H.264-MIXED"
             root.mkdir()
-            first = root / "Original.Show.S01E01.mkv"
-            second = root / "Original.Show.S01E02.mkv"
+            first = root / "Original.Show.S01E01.720p.WEB-DL.H.264-Kitsune.mkv"
+            second = root / "Original.Show.S01E02.720p.WEB-DL.H.264-FLUX.mkv"
             first.write_bytes(b"episode one")
             second.write_bytes(b"episode two")
             with redirect_stdout(io.StringIO()):
@@ -260,13 +282,62 @@ class PrepareTests(unittest.TestCase):
                 )
 
             payload = json.loads(package_path.read_text(encoding="utf-8"))
-            self.assertEqual(root.name, "Original Show S01")
+            self.assertEqual(root.name, "Original.Show.S01.720p.WEB-DL.H.264-MIXED")
             self.assertEqual(sorted(item.name for item in root.iterdir()), sorted([first.name, second.name]))
             self.assertTrue(payload["remain_mode"])
+            self.assertEqual(payload["group"], "MIXED")
+            self.assertTrue(payload["title"].endswith("-MIXED"))
             self.assertEqual(
                 sorted(item["filename"] for item in payload["files"]),
                 sorted([first.name, second.name]),
             )
+
+    @patch("media_title_renamer.prepare.read_mediainfo")
+    @patch("media_title_renamer.prepare.prepare_technical_info")
+    def test_remain_tv_without_year_does_not_require_folder_name_metadata(
+        self, prepare_technical_info_mock, read_mediainfo_mock
+    ):
+        media = MediaInfo(
+            width=1920,
+            height=1080,
+            resolution="1080p",
+            video_format="H.264",
+            writing_library="",
+            video_codec="H.264",
+            hdr=(),
+            hfr=None,
+            audio_codec="AAC",
+            audio_channels="2.0",
+            audio_tracks=1,
+            audio_bitrate=128000,
+            audio_language="en",
+        )
+        read_mediainfo_mock.return_value = media
+        prepare_technical_info_mock.return_value = (
+            "MediaInfo",
+            "General\\nComplete name : episode.mkv\\n",
+            Path("temporary-mediainfo.txt"),
+            None,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "Kitchen Nightmares US S09"
+            root.mkdir()
+            episode = root / "Kitchen.Nightmares.US.S09E01.mkv"
+            episode.write_bytes(b"episode one")
+            with redirect_stdout(io.StringIO()):
+                package_path = prepare_main(
+                    [
+                        str(root), "--kind", "tv", "--title", "Kitchen Nightmares US",
+                        "--source", "WEB-DL", "--remain", "--offline",
+                        "--skip-screenshots", "--skip-torrent",
+                    ]
+                )
+
+            payload = json.loads(package_path.read_text(encoding="utf-8"))
+            self.assertTrue(episode.is_file())
+
+        self.assertTrue(payload["remain_mode"])
+        self.assertEqual(payload["files"][0]["filename"], episode.name)
 
     @patch("media_title_renamer.prepare.read_mediainfo")
     @patch("media_title_renamer.prepare.prepare_technical_info")
@@ -1781,7 +1852,23 @@ LPCM Audio Japanese / 1536 kbps / 2.0 / 48 kHz
         )
         self.assertEqual(
             infer_mteam_category(kind="tv", source="BluRay", resolution="1080p", animation=False),
-            "影剧/综艺/BluRay",
+            "影剧/综艺/HD",
+        )
+        self.assertEqual(
+            infer_mteam_category(kind="movie", source="BluRay BDRip", resolution="1080p", animation=False),
+            "电影/HD",
+        )
+        self.assertEqual(
+            infer_mteam_category(kind="movie", source="UHD BluRay BDRip", resolution="2160p", animation=False),
+            "电影/HD",
+        )
+        self.assertEqual(
+            infer_mteam_category(kind="tv", source="BluRay BDRip", resolution="1080p", animation=True),
+            "动画",
+        )
+        self.assertEqual(
+            infer_mteam_category(kind="tv", source="BluRay", resolution="1080p", animation=True),
+            "动画",
         )
         self.assertEqual(
             infer_mteam_category(kind="tv", source="WEB-DL", resolution="544p", animation=False),
@@ -1921,6 +2008,13 @@ Dolby TrueHD/Atmos Audio
             self.assertEqual(playlist, "00005")
             self.assertEqual(read_bdinfo_report(saved_path), text)
             self.assertEqual(saved_path.name, "bdinfo.txt")
+
+    def test_bdinfo_high_frame_rate_uses_mteam_hfr_spelling(self):
+        media = _media_from_bdinfo(
+            "VIDEO:\nMPEG-4 AVC Video / 1080p / 50 fps\n\nAUDIO:\nDTS-HD Master Audio / 5.1",
+            "BluRay",
+        )
+        self.assertEqual(media.hfr, "HFR")
 
 
 if __name__ == "__main__":

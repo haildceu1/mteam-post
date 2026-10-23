@@ -313,6 +313,34 @@ def _qb_task(session: requests.Session, base_url: str, info_hash: str) -> dict |
     return rows[0] if isinstance(rows, list) and rows else None
 
 
+def _qb_torrent_control(
+    session: requests.Session, base_url: str, action: str, info_hash: str
+) -> str:
+    """Control a torrent across qBittorrent Web API generations.
+
+    qBittorrent 5.x exposes ``start``/``stop``; older releases commonly expose
+    ``resume``/``pause``. Fall back only when the server reports an unknown route.
+    """
+    routes = {"start": ("start", "resume"), "stop": ("stop", "pause")}
+    if action not in routes:
+        raise ValueError("unsupported qB torrent action")
+    for route in routes[action]:
+        try:
+            response = session.post(
+                f"{base_url}/api/v2/torrents/{route}",
+                data={"hashes": info_hash},
+                timeout=10,
+            )
+        except requests.RequestException:
+            raise RuntimeError(f"qB {action} 请求失败") from None
+        if response.status_code in (404, 405):
+            continue
+        if response.status_code != 200:
+            raise RuntimeError(f"qB {action} 失败（HTTP {response.status_code}）")
+        return route
+    raise RuntimeError(f"qB 不支持 {action} 操作路由")
+
+
 def _assert_task_matches(
     session: requests.Session,
     base_url: str,
@@ -354,10 +382,9 @@ def _assert_task_matches(
     if manifest != [(source.name, expected_size)]:
         raise RuntimeError("qB 文件清单与 M-Team 官方单文件种子不一致；保持暂停")
     if task.get("state") not in ("pausedUP", "pausedDL", "stoppedUP", "stoppedDL"):
-        pause = session.post(
-            f"{base_url}/api/v2/torrents/pause", data={"hashes": info_hash}, timeout=10
-        )
-        if pause.status_code != 200:
+        try:
+            _qb_torrent_control(session, base_url, "stop", info_hash)
+        except RuntimeError:
             raise RuntimeError("新任务未暂停且补充暂停失败；请立即在 qB 中检查")
         raise RuntimeError("qB 新任务未保持暂停；已再次暂停，未加标签")
     progress = float(task.get("progress", 0) or 0)
@@ -444,10 +471,9 @@ def _run(args: argparse.Namespace) -> int:
         if "Mteam" not in task_tags:
             raise RuntimeError("qB 尚未确认 Mteam 标签；任务保持暂停")
 
-        resume = session.post(
-            f"{base_url}/api/v2/torrents/resume", data={"hashes": info_hash}, timeout=10
-        )
-        if resume.status_code != 200:
+        try:
+            _qb_torrent_control(session, base_url, "start", info_hash)
+        except RuntimeError:
             raise RuntimeError("qB 启动做种失败；任务已加 Mteam 标签并保留")
         task = None
         for attempt in range(8):

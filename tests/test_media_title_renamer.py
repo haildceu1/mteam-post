@@ -1,11 +1,16 @@
+from argparse import Namespace
+from dataclasses import replace
+from pathlib import Path
 import tempfile
 import unittest
-from argparse import Namespace
-from pathlib import Path
+from unittest.mock import patch
 
+import media_title_renamer.cli as cli
 from media_title_renamer.cli import (
     VIDEO_EXTENSIONS,
     _dvd_disc_label,
+    _canonicalize_hfr_title,
+    _has_bluray_disc_structure,
     _infer_source,
     _parenthesized_release_group,
     _resolve_fields,
@@ -21,10 +26,10 @@ from media_title_renamer.cli import (
 )
 
 
-def media_json(*, writing_library="", audio_format="DTS", audio_profile="MA / Core", audio_bitrate="3 833 000"):
+def media_json(*, video_format="AVC", writing_library="", audio_format="DTS", audio_profile="MA / Core", audio_bitrate="3 833 000"):
     video = {
         "@type": "Video",
-        "Format": "AVC",
+        "Format": video_format,
         "Width": "1 920",
         "Height": "1 080",
         "FrameRate": "23.976",
@@ -50,9 +55,17 @@ def media_json(*, writing_library="", audio_format="DTS", audio_profile="MA / Co
 
 
 class MediaTitleRenamerTests(unittest.TestCase):
-    def test_auto_publish_source_policy_prefers_remux_or_real_disc(self):
+    def test_douban_backfill_is_available_as_media_title_rename_subcommand(self):
+        with patch("sys.argv", ["media-title-rename", "douban-backfill", "--preview"]), patch(
+            "media_title_renamer.douban_backfill.main"
+        ) as backfill_main:
+            cli.main()
+        backfill_main.assert_called_once_with(["--preview"])
+
+    def test_auto_publish_source_policy_distinguishes_disc_remux_and_bdrip(self):
         cases = (
-            ('Movie.2024.BluRay.x265.mkv', '', 'WEB-DL'),
+            ('Movie.2024.BluRay.x265.mkv', '', 'BluRay BDRip'),
+            ('Movie.2024.UHD.BluRay.2160p.x265.mkv', '', 'UHD BluRay BDRip'),
             ('Movie.2024.HDTV.mkv', '', 'WEB-DL'),
             ('Movie.2024.WEBRip.mkv', '', 'WEB-DL'),
             ('Movie.2024.mkv', 'Show.S01.WEBRip', 'WEB-DL'),
@@ -62,6 +75,10 @@ class MediaTitleRenamerTests(unittest.TestCase):
         for name, context, expected in cases:
             with self.subTest(name=name, context=context):
                 self.assertEqual(_autonomous_source(Path('/media') / name, context), expected)
+        self.assertEqual(
+            _infer_source('Movie.2024.UHD.BluRay.2160p.HEVC', '.mkv'),
+            'UHD BluRay BDRip',
+        )
         self.assertEqual(_autonomous_source(Path('/media/Movie.2024.BluRay.iso'), ''), 'BluRay')
         with tempfile.TemporaryDirectory() as directory:
             bdmv = Path(directory) / 'Movie.UHD.BluRay' / 'BDMV'
@@ -69,6 +86,11 @@ class MediaTitleRenamerTests(unittest.TestCase):
             stream.mkdir(parents=True)
             (bdmv / 'index.bdmv').write_bytes(b'')
             self.assertEqual(_autonomous_source(stream / '00001.m2ts', 'Movie.UHD.BluRay'), 'UHD BluRay')
+            self.assertTrue(_has_bluray_disc_structure(stream / '00001.m2ts'))
+            self.assertEqual(
+                _infer_source('Movie.UHD.BluRay.2160p', '.m2ts', disc_structure=True),
+                'UHD BluRay',
+            )
 
     def test_abbreviated_movie_filename_uses_release_folder_title_year_and_source(self):
         args = Namespace(
@@ -85,16 +107,62 @@ class MediaTitleRenamerTests(unittest.TestCase):
         self.assertEqual(source, "BluRay BDRip")
         self.assertEqual(group, "UNDERTAKERS")
 
+    def test_torrent_root_mixed_group_overrides_representative_episode_group(self):
+        args = Namespace(
+            title=None, year=None, source="auto", group=None, edition=None,
+            episode=None, platform=None, kind="tv", gpt=False,
+            default_group_nogrp=False,
+            _source_context="Chicago.Fire.S14.1080p.AMZN.WEB-DL.DDP5.1.H.264-MIXED",
+        )
+        path = Path("/downloads/TL/Chicago.Fire.S14.MIXED/Chicago.Fire.S14E01.1080p.WEB-DL.H.264-Kitsune.mkv")
+        media = inspect_media(media_json(writing_library="x264"), source="WEB-DL")
+
+        _, _, _, group, *_ = _resolve_fields(args, path, media)
+
+        self.assertEqual(group, "MIXED")
+
     def test_source_can_be_read_from_release_root_or_webrip_marker(self):
         self.assertEqual(_infer_source('American Dad S22 DSNP Webrip x265', '.mkv'), 'WEBRip')
         self.assertIsNone(_infer_source('Bookish S01 HEVC x265', '.mkv'))
         self.assertEqual(_parenthesized_release_group('American Dad (1080p WEBRip x265 - Goki)[TAoE]'), 'Goki')
+        self.assertEqual(_parenthesized_release_group('Robin Hood S01 (1080p Bluray x265 HEVC 10bit AAC 5.1 Tigole)'), 'Tigole')
+        self.assertIsNone(_parenthesized_release_group('American Dad (1080p WEBRip x265 AAC 2.0)'))
     def test_repack_is_valid_for_encoded_bluray_but_regional_cut_is_not(self):
         media=inspect_media(media_json(writing_library="x265"),source="BluRay BDRip")
         title=build_title(title="Apocalypto",year="2006",source="BluRay BDRip",media=media,edition="REPACK")
         self.assertIn("REPACK",title)
         with self.assertRaises(ValueError):
             build_title(title="Apocalypto",year="2006",source="BluRay BDRip",media=media,edition="US Cut")
+
+    def test_bluray_bdrip_title_keeps_bluray_and_uses_encode_codec(self):
+        media = inspect_media(media_json(video_format="HEVC", writing_library="x265"), source="BluRay BDRip")
+        self.assertEqual(media.video_codec, "x265")
+        title = build_title(title="Example Movie", year="2020", source="BluRay BDRip",
+                            media=media, group="GROUP")
+        self.assertIn("2020 BluRay 1080p x265", title)
+
+    def test_uhd_bluray_bdrip_title_keeps_uhd_bluray_and_encode_codec(self):
+        raw = media_json(video_format="HEVC", writing_library="x265")
+        raw['media']['track'][1]['Width'] = '3 840'
+        raw['media']['track'][1]['Height'] = '2 160'
+        media = inspect_media(raw, source="UHD BluRay BDRip")
+        title = build_title(title="Example Movie", year="2020", source="UHD BluRay BDRip",
+                            media=media, group="GROUP")
+        self.assertIn("2020 UHD BluRay 2160p x265", title)
+
+    def test_uhd_bluray_bdrip_downscaled_to_1080p_omits_uhd_from_title(self):
+        media = inspect_media(
+            media_json(video_format="HEVC", writing_library="x265"),
+            source="UHD BluRay BDRip",
+        )
+        title = build_title(
+            title="Carnal Knowledge", year="1971", source="UHD BluRay BDRip",
+            media=media, group="SM737",
+        )
+        self.assertEqual(
+            title,
+            "Carnal Knowledge 1971 BluRay 1080p x265 DTS-HD MA5.1-SM737",
+        )
 
     def test_resolution_is_normalized_to_supported_mteam_buckets(self):
         self.assertEqual(_resolution(640, 464), "480p")
@@ -116,12 +184,34 @@ class MediaTitleRenamerTests(unittest.TestCase):
         self.assertEqual(media.audio_codec, "MP3")
         self.assertIn("MP3 2.0", title)
 
+    def test_duplicate_trailing_tmdb_year_is_emitted_once(self):
+        media = inspect_media(media_json(), source="WEB-DL")
+        title = build_title(
+            title="The UnBelievable with Dan Aykroyd 2023",
+            year="2023", episode="S02", source="WEB-DL", media=media,
+            group="iVy",
+        )
+        self.assertTrue(title.startswith("The UnBelievable with Dan Aykroyd 2023 S02 "))
+        self.assertEqual(title.count("2023"), 1)
+
+    def test_numeric_work_title_is_not_removed_when_it_equals_year(self):
+        media = inspect_media(media_json(), source="WEB-DL")
+        title = build_title(title="1917", year="1917", source="WEB-DL", media=media)
+        self.assertTrue(title.startswith("1917 1917 WEB-DL "))
+
     def test_disc_release_group_with_escaped_at_sign_is_kept_consistently(self):
         stem, group = _strip_group(
             "JoJo.Season2.Disc1.2014.JPN.1080p.Blu-ray.AVC.DTS-HD.MA.2.1-blucook#300\\@CHDBits"
         )
         self.assertTrue(stem.endswith("DTS-HD.MA.2.1"))
         self.assertEqual(group, "blucook#300@CHDBits")
+
+    def test_dts_hd_ma_hyphen_does_not_get_misread_as_release_group(self):
+        stem, group = _strip_group(
+            "The Walk 2015 2160p UHD BluRay DV REMUX HDR10 HEVC DTS-HD-MA 5 1-UnKn0wn"
+        )
+        self.assertTrue(stem.endswith("DTS-HD-MA 5 1"))
+        self.assertEqual(group, "UnKn0wn")
 
 
     def test_large_untagged_iso_is_inferred_as_bluray(self):
@@ -169,6 +259,82 @@ class MediaTitleRenamerTests(unittest.TestCase):
             build_title(title="Example Film", year="2025", source="UHD BluRay BDRip", media=media, group="TEST"),
             "Example Film 2025 UHD BluRay 2160p HDR10 DoVi x265 DDP5.1-TEST",
         )
+
+    def test_primary_audio_uses_maximum_bitrate_for_truehd_atmos_core(self):
+        data = media_json(audio_format="PCM", audio_profile="", audio_bitrate="2304000")
+        video = data["media"]["track"][1]
+        video.update({
+            "Format": "HEVC", "Width": "3 840", "Height": "2 160",
+            "HDR_Format": "SMPTE ST 2086", "HDR_Format_Compatibility": "HDR10",
+            "transfer_characteristics": "PQ",
+        })
+        data["media"]["track"].append({
+            "@type": "Audio",
+            "Format": "MLP FBA",
+            "Format_Commercial_IfAny": "Dolby TrueHD with Dolby Atmos",
+            "Format_AdditionalFeatures": "AC-3 16-ch",
+            "BitRate": "384000",
+            "BitRate_Maximum": "6726000",
+            "Channels": "8",
+        })
+
+        media = inspect_media(data, source="UHD BluRay")
+
+        self.assertEqual(media.audio_codec, "TrueHD Atmos")
+        self.assertEqual(media.audio_channels, "7.1")
+        self.assertEqual(media.hdr, ("HDR10",))
+
+    def test_high_frame_rate_uses_mteam_hfr_spelling(self):
+        data = media_json()
+        data["media"]["track"][1]["FrameRate"] = "50.000"
+        media = inspect_media(data, source="WEB-DL")
+        title = build_title(
+            title="Blue Lights",
+            year="2023",
+            episode="S04",
+            source="WEB-DL",
+            media=media,
+            group="NoGrp",
+        )
+        self.assertEqual(media.hfr, "HFR")
+        self.assertEqual(title, "Blue Lights 2023 S04 1080p WEB-DL HFR H.264 DTS-HD MA5.1-NoGrp")
+        self.assertNotRegex(title, r"\b\d+\s*FPS?\b")
+        legacy_media = replace(media, hfr="50Fps")
+        legacy_title = build_title(
+            title="Blue Lights", year="2023", episode="S04", source="WEB-DL",
+            media=legacy_media, group="NoGrp",
+        )
+        self.assertIn(" HFR ", legacy_title)
+        self.assertNotIn("50Fps", legacy_title)
+
+    def test_cached_numeric_fps_title_is_canonicalized_for_mteam(self):
+        self.assertEqual(
+            _canonicalize_hfr_title("Blue Lights 2023 S04 1080p WEB-DL 50Fps H.264 AAC 2.0-NoGrp"),
+            "Blue Lights 2023 S04 1080p WEB-DL HFR H.264 AAC 2.0-NoGrp",
+        )
+        self.assertEqual(
+            _canonicalize_hfr_title("Show S01 1080p WEB-DL 50 fps HFR H.264"),
+            "Show S01 1080p WEB-DL HFR H.264",
+        )
+        self.assertNotIn("24FPS", _canonicalize_hfr_title("Film 2024 1080p WEB-DL 24FPS x264 AAC2.0"))
+
+    def test_filename_high_frame_rate_uses_hfr_for_compact_and_spaced_fps(self):
+        for name in (
+            "Example.Movie.2024.1080p.WEB-DL.x264.50FPS.iso",
+            "Example.Movie.2024.1080p.WEB-DL.x264.60 fps.iso",
+        ):
+            with self.subTest(name=name):
+                media = inspect_media_from_filename(Path(name), source="WEB-DL")
+                self.assertEqual(media.hfr, "HFR")
+                title = build_title(
+                    title="Example Movie",
+                    year="2024",
+                    source="WEB-DL",
+                    media=media,
+                    group="NOGRP",
+                )
+                self.assertIn(" HFR ", title)
+                self.assertNotRegex(title, r"\b\d+\s*FPS?\b")
 
     def test_filename_hints_detects_tv_webdl_group_and_platform(self):
         media = inspect_media(media_json(writing_library="x264 core"), source="WEB-DL")

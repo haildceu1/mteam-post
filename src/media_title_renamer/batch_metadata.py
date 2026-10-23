@@ -416,6 +416,10 @@ def _missing_fields(package: dict[str, Any], *, expected_year: str | None = None
     for field_name in ("title", "subtitle", "category", "douban_url", "group", "technical_info_text"):
         if not str(package.get(field_name) or "").strip():
             missing.append(field_name)
+    category = str(package.get("category") or "").replace("動", "动").replace("畫", "画")
+    tmdb_for_type = package.get("tmdb") if isinstance(package.get("tmdb"), dict) else {}
+    if ("动画" in category or 16 in (tmdb_for_type.get("genre_ids") or [])) and not str(package.get("bangumi_url") or "").strip():
+        missing.append("bangumi_url")
     media = package.get("media") if isinstance(package.get("media"), dict) else {}
     resolution = str(media.get("resolution") or "").strip()
     if resolution not in ALLOWED_RESOLUTIONS:

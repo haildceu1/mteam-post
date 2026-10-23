@@ -129,7 +129,9 @@ def season_folder_map(paths: list[Path], root: Path) -> dict[Path, str] | None:
 
 def sample_or_extra(path: str | Path) -> bool:
     """Whether a video is clearly auxiliary material rather than an episode."""
-    return any(
+    parts = Path(path).parts
+    stem = Path(path).stem.casefold()
+    return stem in {"sample", "samples"} or any(
         part.casefold() in {"sample", "samples", "proof", "trailer", "trailers", "featurettes", "extras"}
-        for part in Path(path).parts
+        for part in parts
     ) or bool(re.search(r"\bCreditless\s+(?:OP|ED)\b|\bNC(?:OP|ED)\b", Path(path).stem, re.I))

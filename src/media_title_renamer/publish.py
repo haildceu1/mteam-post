@@ -68,10 +68,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--profile-dir",
         type=Path,
-        default=_default_profile_dir(),
         help="专用 Chrome 配置目录；默认读取 MTEAM_PROFILE_DIR，否则使用系统用户配置目录",
     )
-    parser.add_argument("--cookie-file", type=Path, help="M-Team Cookie 导出或请求头复制文件")
+    session_source = parser.add_mutually_exclusive_group()
+    session_source.add_argument("--cookie-file", type=Path, help="M-Team Cookie 导出或请求头复制文件")
+    session_source.add_argument("--cookie-stdin", action="store_true", help="从 stdin 内存读取 MoviePilot CookieCloud JSON，不写入会话文件")
+    parser.add_argument("--credentials-file", type=Path, help="两行账密文件；仅在网页未登录时通过 ChromeDriver 登录")
     parser.add_argument("--url", default="https://kp.m-team.cc/upload", help="M-Team 发布页地址")
     uploads = parser.add_mutually_exclusive_group()
     uploads.add_argument("--upload", dest="upload", action="store_true", help="上传种子和 4 张截图（默认）")
@@ -79,6 +81,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.set_defaults(upload=True)
     parser.add_argument("--yes", action="store_true", help="跳过发布页写入/上传前的确认")
     parser.add_argument("--submit", action="store_true", help="完整校验后最终发布一次；默认仅预览")
+    parser.add_argument("--intro-source", choices=("douban", "imdb"), default="douban", help="简介获取按钮来源；仅用户明确允许该条例外时选择 imdb")
+    parser.add_argument("--retry-ambiguous", action="store_true", help="用户明确要求重发且已核对站内与 qB 后，对历史含糊回执允许一次保留旧记录的重试")
     parser.add_argument("--result-json", type=Path, help="发布和官方种子召回结果 JSON")
     parser.add_argument("--recall-official", action="store_true", help="发布后通过 MoviePilot 按详情页 ID 下载官方种子")
     parser.add_argument("--moviepilot-container", default="moviepilot")
@@ -703,16 +707,25 @@ def main(argv: list[str] | None = None) -> None:
             return
 
     fill_args = [str(package_path)]
-    fill_args.extend(["--profile-dir", str(args.profile_dir)])
+    if args.profile_dir:
+        fill_args.extend(["--profile-dir", str(args.profile_dir)])
+    elif not args.cookie_stdin:
+        fill_args.extend(["--profile-dir", str(_default_profile_dir())])
     if args.cookie_file:
         fill_args.extend(["--cookie-file", str(args.cookie_file)])
-    fill_args.extend(["--url", args.url])
+    if args.cookie_stdin:
+        fill_args.append("--cookie-stdin")
+    if args.credentials_file:
+        fill_args.extend(["--credentials-file", str(args.credentials_file)])
+    fill_args.extend(["--url", args.url, "--intro-source", args.intro_source])
     if args.upload:
         fill_args.append("--upload")
     if args.yes:
         fill_args.append("--yes")
     if args.submit:
         fill_args.append("--submit")
+    if args.retry_ambiguous:
+        fill_args.append("--retry-ambiguous")
     if args.result_json:
         fill_args.extend(["--result-json", str(args.result_json)])
     if args.recall_official or (args.submit and not args.no_qb):

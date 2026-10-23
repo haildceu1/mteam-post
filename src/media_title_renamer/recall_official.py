@@ -51,11 +51,24 @@ try:
     # which otherwise needs a running host configuration service in this child.
     spider = object.__new__(MTorrentSpider)
     spider._domain, spider._ua, spider._apikey = domain, ua, row['apikey']
+    # Current MoviePilot versions build the token endpoint from _api_domain.
+    # Since __init__ is intentionally bypassed, resolve it explicitly too.
+    resolver = getattr(spider, '_MTorrentSpider__resolve_api_domain', None)
+    spider._api_domain = resolver({'domain':domain}) if callable(resolver) else f'api.{domain}'
     spider._proxy = get_runtime_setting('PROXY') if row['proxy'] else None
+    # The MoviePilot site's proxy checkbox/runtime setting is authoritative.
+    # Only override it when a caller explicitly provides MTEAM_RECALL_PROXY_URL;
+    # an empty value intentionally means direct access. Search traffic has its
+    # own proxy policy and must not silently force token/download requests via it.
+    if 'proxy_url' in args:
+        proxy_url = str(args['proxy_url'] or '').strip()
+        spider._proxy = {'http':proxy_url,'https':proxy_url} if proxy_url else None
     descriptor = spider._MTorrentSpider__get_download_url(tid)
     closing = descriptor.index(']')
     params = json.loads(base64.b64decode(descriptor[1:closing]))
     endpoint = descriptor[closing + 1:]
+    if not urlsplit(endpoint).hostname:
+        raise ValueError('api_domain_missing')
     session = requests.Session()
     session.trust_env = False
     proxies = spider._proxy
@@ -107,7 +120,7 @@ try:
     print(json.dumps({'ok':True,'torrent_id':tid,'site_id':row['id'],'content':base64.b64encode(content).decode('ascii')}))
 except Exception as exc:
     # Exception messages and API messages may contain credentials or URLs.
-    reasons = {'active_site_missing','not_mteam_site','user_agent_missing',
+    reasons = {'active_site_missing','not_mteam_site','user_agent_missing','api_domain_missing',
                'unsafe_download_link','oversized_torrent','not_binary_torrent'}
     reason = str(exc) if isinstance(exc, ValueError) and str(exc) in reasons else None
     print(json.dumps({'ok':False,'phase':phase,'error_type':type(exc).__name__,'error_reason':reason,
@@ -155,6 +168,7 @@ def validate_manifest(content: bytes, source: Path) -> dict:
     if any(parent.is_symlink() for parent in source.parents):
         raise ValueError("源路径父目录包含符号链接")
     actual = {}
+    expected_root = source.name
     if source.is_dir():
         for directory, dirs, names in os.walk(source, followlinks=False):
             for name in dirs + names:
@@ -178,17 +192,37 @@ def validate_manifest(content: bytes, source: Path) -> dict:
                 raise ValueError("官方种子包含重复路径或无效大小")
             expected[name] = size
     elif source.is_file():
-        if b"files" in info:
-            raise ValueError("单文件源与多文件官方种子不一致")
-        expected = {root: info.get(b"length")}
-        actual = {source.name: source.stat().st_size}
+        records = info.get(b"files")
+        if records is not None:
+            # qB may hold a one-file multifile torrent whose root is the
+            # containing release directory (root/filename), while its
+            # content_path correctly resolves to the actual file. Preserve
+            # that exact torrent layout; do not flatten it into a new hash.
+            if not isinstance(records, list) or len(records) != 1:
+                raise ValueError("单文件源与多文件官方种子不一致")
+            record = records[0]
+            parts = record.get(b"path.utf-8") or record.get(b"path")
+            if not isinstance(parts, list) or len(parts) != 1:
+                raise ValueError("单文件多文件种子路径无效")
+            relative = _component(parts[0])
+            size = record.get(b"length")
+            if not isinstance(size, int) or size < 0:
+                raise ValueError("单文件多文件种子大小无效")
+            if root != source.parent.name or relative != source.name:
+                raise ValueError("单文件源与多文件种子布局不一致")
+            expected_root = source.parent.name
+            expected = {f"{root}/{relative}": size}
+            actual = {f"{source.parent.name}/{source.name}": source.stat().st_size}
+        else:
+            expected = {root: info.get(b"length")}
+            actual = {source.name: source.stat().st_size}
     else:
         raise ValueError("源路径不是普通文件或目录")
-    if root != source.name or expected != actual:
+    if root != expected_root or expected != actual:
         missing = len(set(actual) - set(expected))
         extra = len(set(expected) - set(actual))
         mismatched = sum(actual[k] != expected[k] for k in actual.keys() & expected.keys())
-        raise ValueError(f"官方种子与源资源不一致：根目录一致={root == source.name}，缺失={missing}，额外={extra}，大小不符={mismatched}")
+        raise ValueError(f"官方种子与源资源不一致：根目录一致={root == expected_root}，缺失={missing}，额外={extra}，大小不符={mismatched}")
     size = sum(actual.values())
     if len(pieces) != ((size + piece_length - 1) // piece_length) * 20:
         raise ValueError("官方种子分片数量与总大小不一致")
@@ -197,7 +231,68 @@ def validate_manifest(content: bytes, source: Path) -> dict:
             "manifest_verified":True}
 
 
-def recall(value: str, *, source: Path, output: Path, container: str = "moviepilot", site_id: int = 1) -> dict:
+def verify_piece_hashes(content: bytes, source: Path, *, progress=None) -> dict:
+    """Verify a v1 torrent's ordered piece hashes against the actual source bytes."""
+    manifest=validate_manifest(content,source)
+    info=_bdecode(content)[b'info']
+    piece_length=info[b'piece length']
+    pieces=info[b'pieces']
+    if len(pieces)%20:
+        raise ValueError('torrent_piece_hash_mismatch')
+    records=info.get(b'files')
+    ordered_paths=[]
+    if isinstance(records,list):
+        for record in records:
+            parts=record.get(b'path.utf-8') or record.get(b'path')
+            relative=Path(*[_component(part) for part in parts])
+            ordered_paths.append(source/relative if source.is_dir() else source)
+    else:
+        ordered_paths=[source]
+
+    pending=bytearray()
+    checked=0
+    consumed=0
+    next_report=4*1024**3
+    expected_count=len(pieces)//20
+    def verify_full_piece():
+        nonlocal checked
+        expected=pieces[checked*20:(checked+1)*20]
+        if hashlib.sha1(pending).digest()!=expected:
+            raise ValueError('torrent_piece_hash_mismatch')
+        checked+=1
+        pending.clear()
+
+    for path in ordered_paths:
+        try:
+            fd=os.open(path,os.O_RDONLY|getattr(os,'O_NOFOLLOW',0))
+        except OSError:
+            raise ValueError('torrent_piece_source_unreadable') from None
+        with os.fdopen(fd,'rb') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError('torrent_piece_source_not_regular')
+            while True:
+                block=stream.read(min(8*1024*1024,piece_length-len(pending)))
+                if not block:
+                    break
+                pending.extend(block)
+                consumed+=len(block)
+                if progress and consumed>=next_report:
+                    progress(consumed,manifest['size_bytes'])
+                    next_report=consumed+4*1024**3
+                if len(pending)==piece_length:
+                    verify_full_piece()
+    if pending:
+        verify_full_piece()
+    if checked!=expected_count:
+        raise ValueError('torrent_piece_hash_mismatch')
+    if progress and consumed<manifest['size_bytes']:
+        progress(consumed,manifest['size_bytes'])
+    return {**manifest,'pieces_verified':checked,'piece_length':piece_length,
+            'content_bytes_verified':manifest['size_bytes']}
+
+
+def recall(value: str, *, source: Path, output: Path, container: str = "moviepilot", site_id: int = 1,
+           proxy_url: str | None = None) -> dict:
     tid = torrent_id(value)
     if output.exists():
         result = validate_manifest(output.read_bytes(), source)
@@ -206,8 +301,15 @@ def recall(value: str, *, source: Path, output: Path, container: str = "moviepil
         if receipt.get("mteam_torrent_id") != tid or receipt.get("info_hash") != result["info_hash"]:
             raise ValueError("已有输出缺少匹配的官方召回凭据，拒绝复用或覆盖")
         return {**receipt,"cache_reused":True}
+    request_args = {"torrent_id":tid,"site_id":site_id}
+    selected_proxy = proxy_url
+    if selected_proxy is None and 'MTEAM_RECALL_PROXY_URL' in os.environ:
+        selected_proxy = os.environ['MTEAM_RECALL_PROXY_URL']
+    if selected_proxy is not None:
+        request_args['proxy_url'] = selected_proxy
     process = subprocess.run(
-        ["docker","exec","-i",container,"/opt/venv/bin/python","-",json.dumps({"torrent_id":tid,"site_id":site_id})],
+        ["docker","exec","-i",container,"/opt/venv/bin/python","-",
+         json.dumps(request_args)],
         input=_CONTAINER_DOWNLOAD,text=True,capture_output=True,timeout=150,
     )
     # Runtime imports may emit unrelated lines. Only consume our JSON object.

@@ -29,6 +29,28 @@ VIDEO_EXTENSIONS = {
     ".wmv",
 }
 
+
+def _manifest_has_bluray_disc_structure(paths: list[str | Path]) -> bool:
+    """Return whether file paths describe a Blu-ray ISO or complete BDMV tree."""
+    index_dirs: set[tuple[str, ...]] = set()
+    stream_dirs: set[tuple[str, ...]] = set()
+    for value in paths:
+        raw = str(value).replace("\\", "/")
+        parts = tuple(part.casefold() for part in raw.split("/") if part and part != ".")
+        if parts and parts[-1].endswith(".iso"):
+            return True
+        for index, part in enumerate(parts):
+            if part != "bdmv":
+                continue
+            base = parts[: index + 1]
+            inside = parts[index + 1 :]
+            if len(inside) == 1 and inside[0] == "index.bdmv":
+                index_dirs.add(base)
+            elif len(inside) >= 2 and inside[0] == "stream" and inside[-1].endswith(".m2ts"):
+                stream_dirs.add(base)
+    return bool(index_dirs & stream_dirs)
+
+
 SOURCE_CHOICES = (
     "BluRay",
     "UHD BluRay",
@@ -159,19 +181,32 @@ def _has_any(text: str, *patterns: str) -> bool:
     return any(pattern.upper() in upper for pattern in patterns)
 
 
-def _video_codec(video_format: str, writing_library: str, source: str | None) -> str:
+def _video_codec(
+    video_format: str,
+    writing_library: str,
+    source: str | None,
+    *,
+    disc_structure: bool = False,
+) -> str:
     format_upper = video_format.upper()
     library_upper = writing_library.upper()
-    disc_or_remux = bool(source and (source.endswith("REMUX") or source in {"BluRay", "UHD BluRay"}))
+    disc_or_remux = disc_structure or bool(source and source.upper().endswith("REMUX"))
 
     if "AVC" in format_upper or "H.264" in format_upper:
+        # REMUX preserves the source bitstream. Use the codec family label
+        # (AVC/HEVC) even when the mux metadata reports x264/x265 as the
+        # original writing library; encoder labels are for actual encodes.
         if disc_or_remux:
             return "AVC"
-        return "x264" if "X264" in library_upper else "H.264"
+        if "X264" in library_upper:
+            return "x264"
+        return "H.264"
     if "HEVC" in format_upper or "H.265" in format_upper:
         if disc_or_remux:
             return "HEVC"
-        return "x265" if "X265" in library_upper else "H.265"
+        if "X265" in library_upper:
+            return "x265"
+        return "H.265"
     if "MPEG-2" in format_upper or "MPEG 2" in format_upper or ("MPEG VIDEO" in format_upper and "2" in format_upper):
         return "MPEG2"
     if "VC-1" in format_upper or "VC1" in format_upper:
@@ -185,20 +220,22 @@ def _video_codec(video_format: str, writing_library: str, source: str | None) ->
 
 def _hdr_tokens(track: dict[str, Any]) -> tuple[str, ...]:
     description = " ".join(
-        _field(
-            track,
+        _field(track, name).upper()
+        for name in (
             "HDR_Format",
             "HDR_Format_String",
             "HDR_Format_Compatibility",
             "transfer_characteristics",
             "colour_primaries",
             "ColorPrimaries",
-        ).upper()
-        for track in (track,)
+        )
+        if _field(track, name)
     )
     is_dovi = _has_any(description, "DOLBY VISION", "DOVI", "DVHE", "DV.HE")
     is_hdr10_plus = _has_any(description, "HDR10+")
-    is_hdr10 = _has_any(description, "HDR10", "ST 2084", "SMPTE2084", "PQ")
+    is_hdr10 = _has_any(
+        description, "HDR10", "ST 2084", "SMPTE2084", "SMPTE ST 2086", "ST 2086", "PQ"
+    )
     is_hlg = "HLG" in description or "ARIB-STD-B67" in description
 
     result: list[str] = []
@@ -266,7 +303,14 @@ def _audio_channels(track: dict[str, Any]) -> str | None:
 
 
 def _audio_bitrate(track: dict[str, Any]) -> int:
-    return _integer(_field(track, "BitRate", "BitRate_Nominal", "BitRate_Maximum"))
+    # MediaInfo may report a low compatibility/core bitrate alongside the
+    # actual lossless stream's peak bitrate (e.g. TrueHD Atmos: 384 kb/s core,
+    # 6.7 Mb/s maximum). Compare every available value instead of stopping at
+    # the first populated field.
+    return max(
+        (_integer(_field(track, name)) for name in ("BitRate", "BitRate_Nominal", "BitRate_Maximum")),
+        default=0,
+    )
 
 
 def _select_primary_audio(tracks: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -277,7 +321,9 @@ def _select_primary_audio(tracks: list[dict[str, Any]]) -> dict[str, Any] | None
     return max(tracks, key=_audio_bitrate)
 
 
-def inspect_media(data: dict[str, Any], source: str | None = None) -> MediaInfo:
+def inspect_media(
+    data: dict[str, Any], source: str | None = None, *, disc_structure: bool = False
+) -> MediaInfo:
     """Turn a MediaInfo JSON object into the fields used in an upload title."""
     tracks = data.get("media", {}).get("track", [])
     if not isinstance(tracks, list):
@@ -291,7 +337,7 @@ def inspect_media(data: dict[str, Any], source: str | None = None) -> MediaInfo:
     width = _integer(_field(video, "Width"))
     height = _integer(_field(video, "Height"))
     frame_rate = _number(_field(video, "FrameRate"))
-    hfr = f"{round(frame_rate):.0f}Fps" if frame_rate >= 50 else None
+    hfr = "HFR" if frame_rate >= 50 else None
     video_format = _clean_spaces(" ".join(value for value in (_field(video, "Format"), _field(video, "Format_Version")) if value))
     writing_library = _field(video, "WritingLibrary", "Encoded_Library_Name", "Writing_library")
     scan_type = _field(video, "ScanType", "Scan type")
@@ -303,7 +349,9 @@ def inspect_media(data: dict[str, Any], source: str | None = None) -> MediaInfo:
         resolution=_resolution(width, height, scan_type, scan_order),
         video_format=video_format,
         writing_library=writing_library,
-        video_codec=_video_codec(video_format, writing_library, source),
+        video_codec=_video_codec(
+            video_format, writing_library, source, disc_structure=disc_structure
+        ),
         hdr=_hdr_tokens(video),
         hfr=hfr,
         audio_codec=_audio_codec(primary_audio) if primary_audio else "",
@@ -318,6 +366,25 @@ def inspect_media(data: dict[str, Any], source: str | None = None) -> MediaInfo:
 
 def _clean_spaces(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
+
+
+def _canonicalize_hfr_title(title: str) -> str:
+    """Use M-Team's canonical HFR token instead of numeric FPS spellings."""
+    def replace_fps(match: re.Match[str]) -> str:
+        try:
+            return "HFR" if float(match.group("fps")) >= 50 else ""
+        except ValueError:
+            return ""
+
+    title = re.sub(
+        r"(?<![A-Z0-9])(?P<fps>\d{2,3}(?:\.\d+)?)\s*FPS(?![A-Z0-9])",
+        replace_fps,
+        str(title or ""),
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"\bHFR\b", "HFR", title, flags=re.IGNORECASE)
+    title = re.sub(r"(?:\bHFR\b\s*){2,}", "HFR ", title)
+    return _clean_spaces(title)
 
 
 def _clean_title(value: str) -> str:
@@ -435,11 +502,48 @@ def _dvd_disc_label(file_size: int | None) -> str | None:
     return None
 
 
+def _has_bluray_disc_structure(path: Path) -> bool:
+    """Check physical ISO/BDMV structure without treating a BluRay filename as proof."""
+    if path.is_symlink():
+        return False
+    if path.is_file():
+        if path.suffix.casefold() == ".iso":
+            return True
+        for parent in path.parents:
+            if parent.name.casefold() == "bdmv":
+                stream = parent / "STREAM"
+                if (
+                    (parent / "index.bdmv").is_file()
+                    and stream.is_dir()
+                    and not stream.is_symlink()
+                ):
+                    return any(
+                        item.is_file()
+                        and not item.is_symlink()
+                        and item.suffix.casefold() == ".m2ts"
+                        for item in stream.iterdir()
+                    )
+                return False
+        return False
+    if not path.is_dir():
+        return False
+    names = []
+    for item in path.rglob("*"):
+        if item.is_symlink() or not item.is_file():
+            continue
+        relative = item.relative_to(path).as_posix()
+        if path.name.casefold() == "bdmv":
+            relative = f"BDMV/{relative}"
+        names.append(relative)
+    return _manifest_has_bluray_disc_structure(names)
+
+
 def _infer_source(
     stem: str,
     extension: str,
     media: MediaInfo | None = None,
     file_size: int | None = None,
+    disc_structure: bool = False,
 ) -> str | None:
     tokens = stem.upper().replace("_", " ").replace(".", " ")
     is_uhd = bool(re.search(r"\bUHD\b|\b2160P\b|\b4K\b", tokens))
@@ -465,10 +569,11 @@ def _infer_source(
         # a BDRip encode, otherwise prepare would incorrectly skip BDInfo.
         if extension.lower() == ".iso":
             return "UHD BluRay" if is_uhd else "BluRay"
-        # An explicit x264/x265 writing library proves this is an encode rather
-        # than a disc/REMUX, even when the source filename omitted BDRip.
-        library = (media.writing_library if media else "").upper()
-        if "X264" in library or "X265" in library:
+        # A BluRay tag on an ordinary file is not proof of an authored disc.
+        # Unless the path is inside a real BDMV tree, treat it as a compressed
+        # BluRay-derived encode; title formatting still emits BluRay, while
+        # MediaInfo decides whether the encoder label is x264/x265 or H.264/H.265.
+        if not disc_structure:
             return "UHD BluRay BDRip" if is_uhd else "BluRay BDRip"
         return "UHD BluRay" if is_uhd else "BluRay"
     # A video ISO larger than the largest supported DVD9 capacity is a
@@ -479,11 +584,7 @@ def _infer_source(
 
 
 def _autonomous_source(path: Path, release_name: str = "") -> str | None:
-    """Apply the batch publisher's conservative, format-based source policy.
-
-    BluRay words in an ordinary video filename describe provenance, not an
-    authored disc. Only an explicit REMUX or an actual disc gets that source.
-    """
+    """Infer the M-Team source from disc structure and release evidence."""
     label = f"{path.stem} {release_name}"
     upper = label.upper().replace("_", " ").replace(".", " ")
     is_uhd = bool(re.search(r"\bUHD\b|\b2160P\b|\b4K\b", upper))
@@ -509,13 +610,39 @@ def _autonomous_source(path: Path, release_name: str = "") -> str | None:
             return "UHD BluRay" if is_uhd else "BluRay"
     if re.search(r"\bREMUX\b", upper):
         return "UHD BluRay REMUX" if is_uhd else "BluRay REMUX"
+    if re.search(r"\b(?:UHD\s+)?BLU[ -]?RAY\b|\bBDRIP\b", upper):
+        # A BluRay-tagged regular video file is an encode, not an authored
+        # disc. Keep BDRip internally so title formatting emits BluRay while
+        # codec selection uses x264/x265/H.264/H.265 rather than AVC/HEVC.
+        return "UHD BluRay BDRip" if is_uhd else "BluRay BDRip"
     return "WEB-DL"
 
 
 def _parenthesized_release_group(value: str) -> str | None:
-    """Scene-style '(codec - Group)[tag]' names keep the group inside ()."""
+    """Extract a release group at the end of a technical parenthetical."""
     match = re.search(r'\s-\s*([A-Za-z][A-Za-z0-9_-]{1,29})\s*\)(?:\[[^]]+\])?$', value)
-    return match.group(1) if match else None
+    if match:
+        return match.group(1)
+
+    # Some curated packs omit the dash: ``(1080p BluRay x265 AAC 5.1 Tigole)``.
+    # Only accept a terminal alphabetic token when the same parenthetical has
+    # technical release markers, and never mistake a codec/source tag for a group.
+    match = re.search(r'\s([A-Za-z][A-Za-z0-9_-]{1,29})\s*\)(?:\[[^]]+\])?$', value)
+    if not match:
+        return None
+    group = match.group(1)
+    if group.casefold() in {
+        'bluray', 'bdrip', 'remux', 'webdl', 'webrip', 'hdtv', 'dvd', 'uhd',
+        'x264', 'x265', 'h264', 'h265', 'avc', 'hevc', 'aac', 'ac3', 'dd',
+        'ddp', 'eac3', 'dts', 'truehd', 'flac', 'lpcm', 'opus', 'hdr', 'hdr10',
+        'dovi', 'atmos', '10bit', '8bit', '2160p', '1080p', '720p', '480p',
+    }:
+        return None
+    parenthetical_start = value.rfind('(', 0, match.start(1))
+    technical = r'\b(?:\d{3,4}[pi]|4K|UHD|Blu[ .-]?Ray|BDRip|WEB[ .-]?DL|WEBRip|HDTV|x26[45]|H[ .-]?26[45]|VC[ .-]?1|AVC|HEVC|AAC|AC3|DDP|DTS|TrueHD|FLAC|LPCM|Opus|\d\.\d)\b'
+    if parenthetical_start < 0 or not re.search(technical, value[parenthetical_start:match.start(1)], re.I):
+        return None
+    return group
 
 
 def _strip_group(stem: str) -> tuple[str, str | None]:
@@ -525,7 +652,7 @@ def _strip_group(stem: str) -> tuple[str, str | None]:
 
     technical = list(
         re.finditer(
-            r"\b(?:x26[45]|h\.?26[45]|avc|hevc|mpeg[- .]?2|dts(?:[- .]?hd)?(?:[ .]?ma)?|truehd|ddp|dd|aac|flac|lpcm|pcm|opus)\b",
+            r"\b(?:x26[45]|h\.?26[45]|vc[- .]?1|avc|hevc|mpeg[- .]?2|dts(?:[- .]?hd)?(?:[- .]?ma)?|truehd|ddp|dd|aac|flac|lpcm|pcm|opus)\b",
             stem,
             re.I,
         )
@@ -619,7 +746,13 @@ def filename_hints(path: Path, media: MediaInfo | None = None) -> FilenameHints:
         year=year_match.group(1) if year_match else None,
         edition=edition,
         episode=_normalise_episode(episode_match.group(0)) if episode_match else None,
-        source=_infer_source(stem, path.suffix, media, file_size),
+        source=_infer_source(
+            stem,
+            path.suffix,
+            media,
+            file_size,
+            disc_structure=_has_bluray_disc_structure(path),
+        ),
         group=group,
         platform=_detect_platform(stem),
         country=_detect_country_region(stem),
@@ -703,8 +836,8 @@ def inspect_media_from_filename(path: Path, source: str | None = None) -> MediaI
         hdr.append("HDR")
     if re.search(r"\b(?:DOVI|DV)\b", upper):
         hdr.append("DoVi")
-    fps_match = re.search(r"\b(\d{2,3})(?:FPS|FPS)\b", upper)
-    hfr = f"{int(fps_match.group(1))}Fps" if fps_match and int(fps_match.group(1)) >= 50 else None
+    fps_match = re.search(r"\b(\d{2,3})\s*FPS\b", upper)
+    hfr = "HFR" if fps_match and int(fps_match.group(1)) >= 50 else None
     return MediaInfo(
         width=width,
         height=height,
@@ -744,6 +877,7 @@ def build_title(
     platform: str | None = None,
     country: str | None = None,
     include_audio_count: bool = False,
+    disc_structure: bool = False,
 ) -> str:
     """Build one conservative M-Team-style movie or television title."""
     clean_title = _clean_title(title)
@@ -751,21 +885,43 @@ def build_title(
         raise ValueError("片名不能为空")
     if year and not re.fullmatch(r"(?:19|20)\d{2}", str(year)):
         raise ValueError("年份必须是四位数字，例如 2024")
+    if year:
+        # GPT/file-name title extraction can retain a trailing year even
+        # though build_title adds the authoritative TMDB year separately.
+        # Remove only a duplicate trailing token; keep numeric work titles
+        # such as "1917" intact when the title would otherwise become empty.
+        without_duplicate_year = re.sub(
+            rf"\s+{re.escape(str(year))}$", "", clean_title
+        ).strip()
+        if without_duplicate_year:
+            clean_title = without_duplicate_year
     if not year and not episode:
         raise ValueError("电影标题必须提供四位年份")
     canonical_source = _canonical_source(source)
     if not canonical_source:
         raise ValueError("必须提供来源，例如 BluRay REMUX 或 WEB-DL")
+    if canonical_source == "UHD BluRay BDRip" and media.resolution != "2160p":
+        # Keep UHD as provenance internally, but do not claim UHD in the
+        # public title when the actual encoded file is 1080p/SD.
+        canonical_source = "BluRay BDRip"
 
-    # Recalculate after the final source is known: BluRay/REMUX must use AVC,
-    # HEVC or MPEG2; compressed releases use x264/H.264/x265/H.265.
-    codec = _video_codec(media.video_format, media.writing_library, canonical_source)
+    # A BluRay source label describes provenance, not the file's physical
+    # structure. A real disc or explicit REMUX uses the source codec-family
+    # spelling; for ordinary encodes, an x264/x265 writing library is evidence
+    # for the encoder label.
+    codec = _video_codec(
+        media.video_format,
+        media.writing_library,
+        canonical_source,
+        disc_structure=disc_structure,
+    )
     parts = [clean_title]
     if year:
         parts.append(str(year))
     clean_edition = _clean_title(edition or "")
     if clean_edition:
-        if canonical_source not in {"BluRay", "UHD BluRay"} and clean_edition.upper() not in {"REPACK", "PROPER", "RERIP"}:
+        valid_remux_edition = canonical_source.endswith("REMUX") and clean_edition.upper() == "OAR"
+        if canonical_source not in {"BluRay", "UHD BluRay"} and clean_edition.upper() not in {"REPACK", "PROPER", "RERIP", "UNRATED"} and not valid_remux_edition:
             raise ValueError("地区/版本标注仅用于 BluRay/UHD BluRay 原盘")
         parts.append(clean_edition)
     if episode:
@@ -784,7 +940,9 @@ def build_title(
         if country:
             parts.append(_clean_component(country).upper())
     if media.hfr:
-        parts.append(media.hfr)
+        # Older cached prepare packages may carry values such as ``50Fps``;
+        # the M-Team title vocabulary has a single canonical token.
+        parts.append("HFR")
     parts.extend(media.hdr)
     parts.append(codec)
     if media.audio_codec:
@@ -837,7 +995,9 @@ def read_mediainfo(path: Path, source: str | None = None) -> MediaInfo:
     except json.JSONDecodeError as exc:
         raise RuntimeError("MediaInfo 返回的 JSON 无法解析") from exc
     try:
-        return inspect_media(data, source=source)
+        return inspect_media(
+            data, source=source, disc_structure=_has_bluray_disc_structure(path)
+        )
     except ValueError:
         if path.suffix.lower() != ".iso":
             raise
@@ -959,6 +1119,7 @@ def _resolve_fields(
         and args.edition is None
         and source not in {"BluRay", "UHD BluRay"}
         and str(edition or "").upper() not in {"REPACK", "PROPER", "RERIP"}
+        and not (source.endswith("REMUX") and str(edition or "").upper() == "OAR")
     ):
         # An AI's "complete/integral" or regional label is not a valid
         # WEB-DL/REMUX edition field. Do not turn a safe default into a hard
@@ -970,7 +1131,10 @@ def _resolve_fields(
         or _parenthesized_release_group(context_name)
         or filename_hints(Path((context_name or path.parent.name) + ".mkv")).group
     )
-    group = args.group if args.group is not None else (hints.group or context_group or (gpt_identity.group if gpt_identity else ""))
+    # The qB/TL release root names the torrent-level release. Prefer it over
+    # the first episode's embedded group when a season pack intentionally
+    # combines files from multiple scene groups (for example, ``-MIXED``).
+    group = args.group if args.group is not None else (context_group or hints.group or (gpt_identity.group if gpt_identity else ""))
     if not group and getattr(args, "default_group_nogrp", False):
         group = "NOGRP"
     if args.group == "NOGRP" and getattr(args, "gpt", False):
@@ -1025,8 +1189,17 @@ def _title_for_path(args: argparse.Namespace, path: Path) -> tuple[MediaInfo, Fi
     title, year, source, group, edition, episode, platform = _resolve_fields(args, path, initial_media)
     # Source controls codec vocabulary; retain the technical probe, then derive
     # the title using the final source selection.
+    disc_structure = _has_bluray_disc_structure(path)
     media = MediaInfo(
-        **{**initial_media.__dict__, "video_codec": _video_codec(initial_media.video_format, initial_media.writing_library, source)}
+        **{
+            **initial_media.__dict__,
+            "video_codec": _video_codec(
+                initial_media.video_format,
+                initial_media.writing_library,
+                source,
+                disc_structure=disc_structure,
+            ),
+        }
     )
     hints = filename_hints(path, media)
     kind = args.kind
@@ -1045,6 +1218,7 @@ def _title_for_path(args: argparse.Namespace, path: Path) -> tuple[MediaInfo, Fi
         platform=platform,
         country=hints.country,
         include_audio_count=args.audio_count,
+        disc_structure=disc_structure,
     )
     return media, hints, title_text
 
@@ -1075,6 +1249,11 @@ def _describe_media(media: MediaInfo) -> str:
 
 
 def main() -> None:
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "douban-backfill":
+        from .douban_backfill import main as douban_backfill_main
+
+        douban_backfill_main(sys.argv[2:])
+        return
     if len(sys.argv) > 1 and sys.argv[1].lower() == "auto":
         from .autonomous import main as autonomous_main
         raise SystemExit(autonomous_main(sys.argv[2:]))
@@ -1116,7 +1295,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="读取 MediaInfo，生成符合 M-Team 影片标题规则的名称；默认只预览，不改文件。",
         epilog=(
-            "子命令：prepare（准备资料）、publish（准备并填发布页）、"
+            "子命令：prepare（准备资料）、publish（准备并填发布页）、douban-backfill（批量补全豆瓣链接）、"
             "seed-official（经 qB WebUI API 添加已发布官方种子）、"
             "subtitle-generate（生成字幕测试文件）、subtitle-upload（批量填写/上传字幕）。"
         ),

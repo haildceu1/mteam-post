@@ -16,6 +16,22 @@ from media_title_renamer.episode_mapping import episode_number_hint, sequential_
 
 
 class BatchMetadataTests(unittest.TestCase):
+    def test_animation_metadata_requires_bangumi_link(self):
+        package = {
+            "title": "Example Anime S01 1080p WEB-DL x265 AAC-NOGRP",
+            "subtitle": "Example Anime",
+            "category": "动画",
+            "douban_url": "https://movie.douban.com/subject/123/",
+            "group": "NOGRP",
+            "technical_info_text": "MediaInfo",
+            "media": {"resolution": "1080p", "video_codec": "x265", "audio_codec": "AAC"},
+            "tmdb": {"genre_ids": [16], "original_language": "en"},
+        }
+
+        self.assertIn("bangumi_url", _missing_fields(package))
+        package["bangumi_url"] = "https://bgm.tv/subject/123/"
+        self.assertNotIn("bangumi_url", _missing_fields(package))
+
     def test_scans_movie_and_tv_without_following_symlinks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "TL"
@@ -104,7 +120,7 @@ class BatchMetadataTests(unittest.TestCase):
             resource = scan_resources(root.parent)[0]
             hints = _resource_name_hints(resource)
 
-        self.assertEqual(hints.source, "BluRay")
+        self.assertEqual(hints.source, "BluRay BDRip")
         self.assertEqual(hints.group, "GUACAMOLE")
         self.assertEqual(hints.year, "1978")
 

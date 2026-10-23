@@ -141,6 +141,7 @@ class CliproxyAssistant:
             self.timeout = 45
         self.web_search = web_search
         self.last_web_search_used = False
+        self.last_web_search_queries: list[str] = []
         self.last_web_search_error = ""
         self.last_douban_choice_confidence: float | None = None
         self.last_douban_candidates: list[Mapping[str, Any]] = []
@@ -303,6 +304,21 @@ class CliproxyAssistant:
         )
         web_timeout = int(os.environ.get('CLIPROXY_WEB_TIMEOUT', str(self.timeout)))
         response_payload = self._open(request, timeout=web_timeout)
+        self.last_web_search_queries = []
+        output = response_payload.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, Mapping):
+                    continue
+                item_type = str(item.get("type") or "").casefold()
+                if not item_type.startswith("web_search"):
+                    continue
+                action = item.get("action") if isinstance(item.get("action"), Mapping) else {}
+                query = str(action.get("query") or item.get("query") or "").strip()
+                if query:
+                    query = re.sub(r"https?://\S+", "[url]", query)[:200]
+                    if query not in self.last_web_search_queries:
+                        self.last_web_search_queries.append(query)
         content, used_search = self._response_text(response_payload)
         self.last_web_search_used = used_search
         result = _extract_json(content)

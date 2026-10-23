@@ -113,6 +113,7 @@ class CliproxyTests(unittest.TestCase):
                         "type": "web_search_call",
                         "id": "ws_local_test",
                         "status": "completed",
+                        "action": {"type": "search", "query": "site:movie.douban.com/subject Westworld 2016"},
                     },
                     {
                         "type": "message",
@@ -145,6 +146,7 @@ class CliproxyTests(unittest.TestCase):
 
         self.assertEqual(identity.search_title, "Westworld")
         self.assertTrue(assistant.last_web_search_used)
+        self.assertEqual(assistant.last_web_search_queries, ["site:movie.douban.com/subject Westworld 2016"])
         request = urlopen.call_args.args[0]
         self.assertTrue(request.full_url.endswith("/v1/responses"))
         body = json.loads(request.data.decode("utf-8"))

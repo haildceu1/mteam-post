@@ -18,9 +18,16 @@ def test_movie_does_not_require_bangumi():
     assert mteam_fill._validated_bangumi_url({'category': '电影/HD'}) == ''
 
 
-def test_english_animation_can_publish_without_bangumi():
-    assert mteam_fill._validated_bangumi_url({'category':'动画',
-        'tmdb':{'original_language':'en','genre_ids':[16]}}) == ''
+def test_english_animation_still_requires_bangumi():
+    with pytest.raises(ValueError, match='bangumi_url'):
+        mteam_fill._validated_bangumi_url({'category':'动画',
+            'tmdb':{'original_language':'en','genre_ids':[16]}})
+
+
+def test_animated_movie_requires_bangumi_even_outside_animation_category():
+    with pytest.raises(ValueError, match='bangumi_url'):
+        mteam_fill._validated_bangumi_url({'category':'电影/HD',
+            'tmdb':{'original_language':'en','genre_ids':[16]}})
 
 
 def test_bangumi_form_value_must_match_package():

@@ -24,6 +24,8 @@ from .cli import (
     VIDEO_EXTENSIONS,
     FilenameHints,
     MediaInfo,
+    _has_bluray_disc_structure,
+    _manifest_has_bluray_disc_structure,
     _canonical_source,
     _autonomous_source,
     _find_mediainfo,
@@ -52,6 +54,15 @@ MTEAM_CATEGORIES = (
     "动画",
     "动画/Bluray",
 )
+
+DEFAULT_DOUBAN_COOKIE_FILE = Path("/data/Zhyw/media-stack/moviepilot-maintenance/douban.xlsx")
+
+
+def _configured_douban_cookie_path() -> str:
+    configured = os.environ.get("DOUBAN_COOKIE_FILE", "").strip()
+    if configured:
+        return configured
+    return str(DEFAULT_DOUBAN_COOKIE_FILE) if DEFAULT_DOUBAN_COOKIE_FILE.is_file() else ""
 
 LANGUAGE_NAMES = {
     "ar": "阿拉伯语",
@@ -460,7 +471,7 @@ def _douban_request_headers(diagnostics: list[str] | None = None) -> dict[str, s
     result metadata, or URLs.
     """
     headers = dict(_DOUBAN_HEADERS)
-    cookie_path = os.environ.get("DOUBAN_COOKIE_FILE", "").strip()
+    cookie_path = _configured_douban_cookie_path()
     if not cookie_path:
         return headers
     try:
@@ -878,10 +889,10 @@ def infer_mteam_category(
     resolution: str,
     animation: bool,
     dvd_iso: bool | None = None,
+    bluray_disc: bool = False,
 ) -> str:
     source_upper = source.upper()
-    disc_bluray = source in {"BluRay", "UHD BluRay"}
-    any_bluray = "BLURAY" in source_upper
+    disc_bluray = bluray_disc and source_upper not in {"DVD", "DVD5", "DVD9"}
     if dvd_iso is None:
         dvd_iso = source in {"DVD5", "DVD9"}
     resolution_match = re.match(r"(\d+)[pi]$", resolution or "", re.I)
@@ -889,7 +900,7 @@ def infer_mteam_category(
     # The Survivor S07 files are 544p and must therefore use the SD category.
     sd = bool(resolution_match and int(resolution_match.group(1)) < 720)
     if animation:
-        return "动画/Bluray" if any_bluray else "动画"
+        return "动画/Bluray" if disc_bluray else "动画"
     if kind == "tv":
         if dvd_iso:
             return "影剧/综艺/DVDiSo"
@@ -903,6 +914,48 @@ def infer_mteam_category(
     if disc_bluray:
         return "电影/BluRay"
     return "电影/SD" if sd else "电影/HD"
+
+
+def _validate_bluray_category(
+    category: str, has_disc_structure: bool, source: str = ""
+) -> None:
+    canonical = (
+        re.sub(r"\s+", "", str(category or ""))
+        .replace("電", "电").replace("劇", "剧").replace("綜", "综")
+        .replace("藝", "艺").replace("動", "动").replace("畫", "画")
+        .casefold()
+    )
+    source_is_dvd = str(source or "").upper() in {"DVD", "DVD5", "DVD9"}
+    if canonical in {"电影/bluray", "影剧/综艺/bluray", "动画/bluray"} and (
+        not has_disc_structure or source_is_dvd
+    ):
+        raise ValueError(
+            f"分类“{category}”要求真实 Blu-ray ISO 或完整 BDMV 光盘目录；"
+            "当前资料包未证明是 Blu-ray 原盘，请改用 HD/SD/动画分类并重新准备。"
+        )
+
+
+def _package_has_bluray_disc_structure(package: dict[str, Any]) -> bool:
+    records = package.get("files")
+    names: list[str] = []
+    if isinstance(records, list):
+        input_path = Path(str(package.get("input_path") or ""))
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            value = str(record.get("relative_path") or record.get("name") or record.get("filename") or "")
+            if not value and record.get("source_path"):
+                source_path = Path(str(record["source_path"]))
+                try:
+                    value = source_path.relative_to(input_path).as_posix()
+                except (OSError, ValueError):
+                    value = source_path.name
+            if value:
+                names.append(value)
+    if names and _manifest_has_bluray_disc_structure(names):
+        return True
+    input_value = str(package.get("input_path") or "").strip()
+    return _has_bluray_disc_structure(Path(input_value)) if input_value else False
 
 
 def _bencode(value: Any) -> bytes:
@@ -2581,9 +2634,9 @@ def _media_from_bdinfo(text: str, source: str) -> MediaInfo:
         resolution=f"{height}{scan}",
         video_format=video_format,
         writing_library="",
-        video_codec=_video_codec(video_format, "", source),
+        video_codec=_video_codec(video_format, "", source, disc_structure=True),
         hdr=tuple(hdr),
-        hfr=f"{round(frame_rate):.0f}Fps" if frame_rate >= 50 else None,
+        hfr="HFR" if frame_rate >= 50 else None,
         audio_codec=primary[1],
         audio_channels=primary[2],
         audio_tracks=len(audio_rows),
@@ -2688,6 +2741,39 @@ def _folder_videos(root: Path) -> list[Path]:
         (item for item in iterator if item.is_file() and item.suffix.lower() in VIDEO_EXTENSIONS),
         key=lambda item: str(item).casefold(),
     )
+
+
+def _bdmv_main_feature_video(root: Path, videos: list[Path]) -> Path | None:
+    """Choose a BDMV representative stream only when one feature dominates.
+
+    The torrent still contains the complete, untouched disc tree. This picks
+    one large M2TS solely for MediaInfo and screenshots; ambiguous multi-cut
+    discs fail closed instead of being mistaken for a folder of movie files.
+    """
+    entries = [root, *root.rglob("*")]
+    stream_dirs = []
+    for entry in entries:
+        if not entry.is_dir() or entry.is_symlink() or entry.name.casefold() != "bdmv":
+            continue
+        stream = next((child for child in entry.iterdir()
+                       if child.is_dir() and not child.is_symlink()
+                       and child.name.casefold() == "stream"), None)
+        if stream is not None:
+            stream_dirs.append(stream)
+    if not stream_dirs:
+        return None
+    if len(stream_dirs) != 1:
+        raise ValueError("BDMV 主片流无法无歧义判断：发现多个光盘结构")
+    candidates = [path for path in videos
+                  if path.parent == stream_dirs[0]
+                  and path.suffix.casefold() == ".m2ts"
+                  and path.is_file() and not path.is_symlink()]
+    candidates.sort(key=lambda path: path.stat().st_size, reverse=True)
+    if not candidates or candidates[0].stat().st_size < 8 * 1024**3:
+        raise ValueError("BDMV 主片流无法无歧义判断：没有足够大的正片流")
+    if len(candidates) > 1 and candidates[0].stat().st_size < 4 * candidates[1].stat().st_size:
+        raise ValueError("BDMV 主片流无法无歧义判断：多个 M2TS 文件体积接近")
+    return candidates[0]
 
 
 def _tmdb_search_with_aliases(client, args, kind, base_title, year):
@@ -2834,7 +2920,7 @@ def _douban_for_release(
             diagnostics=douban_diagnostics,
         )
         cookie_used = False
-        cookie_path = os.environ.get("DOUBAN_COOKIE_FILE", "").strip()
+        cookie_path = _configured_douban_cookie_path()
         if cookie_path:
             try:
                 cookie_used = bool(load_douban_cookie_header(cookie_path))
@@ -3397,6 +3483,7 @@ def _prepare_folder(
             paths = non_auxiliary
     if not paths:
         raise ValueError("目录中没有找到支持的视频文件")
+    bluray_disc = _has_bluray_disc_structure(root)
 
     probes: list[tuple[Path, FilenameHints]] = []
     missing_episodes: list[Path] = []
@@ -3491,12 +3578,14 @@ def _prepare_folder(
     shared_args.episode = first_hints.episode
     if rename_root:
         shared_args._source_context = root.name
+    root_hints = filename_hints(Path(root.name + ".mkv"))
     if shared_args.group is None:
-        shared_args.group = first_hints.group
+        # Prefer the torrent/season root's explicit group. Episode-level
+        # groups may vary in compiled season packs whose root is marked MIXED.
+        shared_args.group = root_hints.group or first_hints.group
     base_title, year, common_source, common_group, edition, _episode, common_platform = _resolve_fields(
         shared_args, first_path, first_media
     )
-    root_hints = filename_hints(Path(root.name + ".mkv"))
     if not year and root_hints.year:
         year = root_hints.year
     # _resolve_fields stores the optional AI client on the shared namespace so
@@ -3615,10 +3704,16 @@ def _prepare_folder(
     year = args.year or (tmdb.year if tmdb and tmdb.year else year)
     tmdb_id = tmdb.id if tmdb else args.tmdb_id
     season = _season_label([hints.episode or "" for _path, hints in probes])
-    series_folder_name = _series_folder_name(title, year, tmdb_id, season=season)
-    target_root = root if args.remain else (
-        root.with_name(series_folder_name) if rename_root else root.parent / series_folder_name
-    )
+    if args.remain:
+        # In remain mode no destination folder is constructed. Requiring a
+        # four-digit year here made otherwise valid no-rename metadata runs
+        # fail when the release path omitted the year and TMDB was unavailable.
+        target_root = root
+    else:
+        series_folder_name = _series_folder_name(title, year, tmdb_id, season=season)
+        target_root = (
+            root.with_name(series_folder_name) if rename_root else root.parent / series_folder_name
+        )
     episode_seasons = {
         season_number
         for _path, hints in probes
@@ -3680,7 +3775,12 @@ def _prepare_folder(
         media = MediaInfo(
             **{
                 **first_media.__dict__,
-                "video_codec": _video_codec(first_media.video_format, first_media.writing_library, source),
+                "video_codec": _video_codec(
+                    first_media.video_format,
+                    first_media.writing_library,
+                    source,
+                    disc_structure=_has_bluray_disc_structure(path),
+                ),
             }
         )
         episode = hints.episode or ""
@@ -3695,6 +3795,7 @@ def _prepare_folder(
             platform=platform,
             country=country,
             include_audio_count=args.audio_count,
+            disc_structure=_has_bluray_disc_structure(path),
         )
         if args.remain:
             target = path
@@ -3765,6 +3866,7 @@ def _prepare_folder(
         platform=representative.platform,
         country=representative.country or common_country,
         include_audio_count=args.audio_count,
+        disc_structure=_has_bluray_disc_structure(representative.source_path),
     )
     douban_seasons = {
         season_number
@@ -3799,7 +3901,9 @@ def _prepare_folder(
             Path(representative.source_path).suffix.casefold() == ".iso"
             and representative.source in {"DVD", "DVD5", "DVD9"}
         ),
+        bluray_disc=bluray_disc,
     )
+    _validate_bluray_category(category, bluray_disc, representative.source)
 
     output_dir = (args.output or root.parent / f"{pack_title}.prepare").resolve()
     if args.apply and (rename_root or args.hardlink) and not args.remain:
@@ -4065,6 +4169,10 @@ def main(argv: list[str] | None = None, *, _args: argparse.Namespace | None = No
         if path.is_dir():
             videos = [item for item in _folder_videos(path)
                       if not sample_or_extra(item.relative_to(path))]
+            if args.kind == "movie":
+                bdmv_main = _bdmv_main_feature_video(path, videos)
+                if bdmv_main is not None:
+                    videos = [bdmv_main]
             root_episode = filename_hints(Path(path.name + ".mkv")).episode
             movie_folder = (args.kind == "movie" or
                             (args.kind == "auto" and not root_episode and len(videos) == 1
@@ -4130,7 +4238,12 @@ def main(argv: list[str] | None = None, *, _args: argparse.Namespace | None = No
         media = MediaInfo(
             **{
                 **initial_media.__dict__,
-                "video_codec": _video_codec(initial_media.video_format, initial_media.writing_library, source),
+                "video_codec": _video_codec(
+                    initial_media.video_format,
+                    initial_media.writing_library,
+                    source,
+                    disc_structure=_has_bluray_disc_structure(path),
+                ),
             }
         )
         release_title = build_title(
@@ -4144,6 +4257,7 @@ def main(argv: list[str] | None = None, *, _args: argparse.Namespace | None = No
             platform=platform,
             country=hints.country,
             include_audio_count=args.audio_count,
+            disc_structure=_has_bluray_disc_structure(path),
         )
         target = path if args.remain else path.with_name(release_title + path.suffix.lower())
         if (
@@ -4195,7 +4309,9 @@ def main(argv: list[str] | None = None, *, _args: argparse.Namespace | None = No
             resolution=media.resolution,
             animation=animation,
             dvd_iso=(path.suffix.casefold() == ".iso" and source in {"DVD", "DVD5", "DVD9"}),
+            bluray_disc=_has_bluray_disc_structure(path),
         )
+        _validate_bluray_category(category, _has_bluray_disc_structure(path), source)
 
         output_dir = (args.output or target.with_suffix(".prepare")).resolve()
         screenshots_dir = output_dir / "screenshots"
@@ -4224,7 +4340,7 @@ def main(argv: list[str] | None = None, *, _args: argparse.Namespace | None = No
             release_title = build_title(title=title, year=year, source=source,
                 media=media, group=group, edition=edition, episode=episode,
                 platform=platform, country=hints.country,
-                include_audio_count=args.audio_count)
+                include_audio_count=args.audio_count, disc_structure=True)
 
         screenshot_paths: list[Path] = []
         if not args.skip_screenshots:

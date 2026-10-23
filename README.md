@@ -372,6 +372,34 @@ This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 豆瓣自动补全使用名称和年份匹配。对于剧集，程序会从 `SxxExx`、`SxxDxx` 或 `Season xx` 识别季数，先向 TMDB 查询该季的正式名称（例如 `Pearl Islands`），再用“剧名 + 季名/季数”查询豆瓣，并只接受季数完全相同的条目；因此不会把《幸存者》第七季误填成当前搜索结果中的第五十季。若没有找到目标季的可靠条目，链接会留空并提示手工补充。找不到可靠结果时，交互模式会让你粘贴链接；也可以始终使用 `--douban-url` 覆盖自动结果。
 
+对于已经生成但缺少豆瓣链接的资料包，可以用 `media-title-rename douban-backfill` 批量回填；安装项目脚本后也可用 `media-douban-backfill`。默认只预览；它会在内存中复用已配置的豆瓣 XLSX Cookie，优先用 TMDB/IMDb 名称搜索，再核对豆瓣候选详情页的 IMDb ID、类型、年份和季数。多个独立资料包具有完全相同的 TMDB/IMDb/作品类型/季数且一致指向唯一豆瓣链接时，也可按交叉证据回填。剧集若只存在第一季豆瓣页，可在页面 IMDb 与整剧 IMDb 精确一致时作为后续季回退；若页面没有 IMDb，则只有精确原名、精确首播年、候选明确为第一季且页面无类型/IMDb冲突时，才以 0.94 置信度回退。若豆瓣把系列页类型错误标成电影，仅在 IMDb ID、精确标题一致且候选没有季号时，才允许带 0.99 置信度通过，并在报告中标明类型冲突。仅高置信候选可用 `--apply` 写入，歧义或风控会保留为待确认；搜索间隔默认为 30 秒，所有批次共用同一个限速状态文件，防止新报告重置冷却时间。`--web-search` 对豆瓣本地搜索未解决的条目分别让 CLIProxyAPI 搜索标题/年份/季数和 IMDb；实际搜索词写入不含凭据的诊断。`--web-search-only` 可在已有豆瓣搜索失败后跳过搜索接口，仅用该联网回退。报告和备份保存在 `.mteam-transfer/douban-backfill/` 下。`--consensus-only` 可只执行本地共识核对，不加载 Cookie 或访问网络。
+
+对于确实缺少 TMDB/IMDb 字段、或网页搜索已找到但常规豆瓣搜索未列出的候选，可用 `--identity-overrides` 以资料包绝对路径为键补充标题别名、ID 和候选豆瓣 URL。URL 仅作为待验证候选；工具会重新抓取豆瓣 subject 页面并核对标题、年份、IMDb 和类型，不会因 URL 被提供就直接写入。补充只参与候选搜索与验证，不会回写或覆盖资料包原身份；任何已有年份、类型或 ID 冲突都会在联网前拒绝处理。例如：
+
+```json
+{
+  "/data/.../mteam-prepare.json": {
+    "titles": ["Fai caan che", "Wheels on Meals", "快餐车"],
+    "year": "1984",
+    "media_type": "movie",
+    "imdb_id": "tt0087578",
+    "candidate_urls": ["https://movie.douban.com/subject/1292867/"]
+  }
+}
+```
+
+```bash
+media-title-rename douban-backfill /data/Zhyw/media-stack/downloads/.mteam-transfer/batch-publish/over-10d-metadata-20260930 --output /data/Zhyw/media-stack/downloads/.mteam-transfer/douban-backfill/over-10d-preview
+# 常规搜索未能确定的条目，额外请求 CLIProxyAPI 的 web_search；所有 URL 仍需豆瓣页面证据核验
+media-title-rename douban-backfill /data/Zhyw/media-stack/downloads/.mteam-transfer/batch-publish --web-search --output /data/Zhyw/media-stack/downloads/.mteam-transfer/douban-backfill/all-preview
+# 对此前已搜索过但仍缺链接的资料包，只执行 CLIProxyAPI 联网搜索回退
+media-title-rename douban-backfill /data/Zhyw/media-stack/downloads/.mteam-transfer/batch-publish --web-search-only --output /data/Zhyw/media-stack/downloads/.mteam-transfer/douban-backfill/web-only-preview
+# 检查 summary.md / results.jsonl 后，仅回填高置信结果
+media-title-rename douban-backfill /data/Zhyw/media-stack/downloads/.mteam-transfer/batch-publish --web-search --apply --output /data/Zhyw/media-stack/downloads/.mteam-transfer/douban-backfill/all-apply
+# 只依据多个资料包之间一致的身份链接回填，不进行网站搜索
+media-title-rename douban-backfill /data/Zhyw/media-stack/downloads/.mteam-transfer/batch-publish --consensus-only --apply --output /data/Zhyw/media-stack/downloads/.mteam-transfer/douban-backfill/consensus-apply
+```
+
 ### ChromeDriver 自动填入 M-Team
 
 `prepare` 完成后，可用 ChromeDriver 打开已登录页面并填入资料。程序会上传种子和截图（需要 `--upload`），但永远停在最终发布按钮之前：

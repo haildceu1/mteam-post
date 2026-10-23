@@ -23,6 +23,7 @@ Repository = "https://github.com/haildceu1/mteam-post"
 [project.scripts]
 mteam-post = "media_title_renamer.cli:main"
 media-title-rename = "media_title_renamer.cli:main"
+media-douban-backfill = "media_title_renamer.douban_backfill:main"
 random-video-screenshots = "random_video_screenshots.cli:main"
 
 [tool.setuptools.packages.find]
